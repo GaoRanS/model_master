@@ -279,6 +279,8 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
   tf.logging.info("Data preprocessing complete. Time: {:.1f} sec."
                   .format(run_time))
 
+  print(producer)
+
   return ncf_dataset, producer
 
 
