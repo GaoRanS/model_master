@@ -91,8 +91,8 @@ class NCFDataset(object):
     self.deterministic = deterministic
 
 
-def _filter_index_sort(raw_rating_path, match_mlperf):
-  # type: (str, bool) -> (pd.DataFrame, dict, dict)
+def _filter_index_sort(raw_rating_path, cache_path, match_mlperf):
+  # type: (str, str, bool) -> dict
   """Read in data CSV, and output structured data.
 
   This function reads in the raw CSV of positive items, and performs three
@@ -125,6 +125,26 @@ def _filter_index_sort(raw_rating_path, match_mlperf):
     IDs to regularized user IDs, and a dict mapping raw item IDs to regularized
     item IDs.
   """
+  if tf.gfile.Exists(cache_path):
+    with tf.gfile.Open(cache_path, "rb") as f:
+      cached_data = pickle.load(f)
+
+    cache_age = time.time() - cached_data.get("create_time", 0)
+    if cache_age > rconst.CACHE_INVALIDATION_SEC:
+      tf.logging.info("Removing raw data cache file")
+      tf.gfile.Remove(cache_path)
+    else:
+      try:
+        for key in [rconst.TRAIN_USER_KEY, rconst.TRAIN_ITEM_KEY,
+                    rconst.EVAL_USER_KEY, rconst.EVAL_ITEM_KEY, "user_map",
+                    "item_map"]:
+          if key not in cached_data:
+            raise KeyError
+        return cached_data
+      except KeyError:
+        tf.logging.error("Invalid cache file.")
+        tf.gfile.Remove(cache_path)
+
   with tf.gfile.Open(raw_rating_path) as f:
     df = pd.read_csv(f)
 
@@ -182,7 +202,24 @@ def _filter_index_sort(raw_rating_path, match_mlperf):
   df = df.reset_index()  # The dataframe does not reconstruct indicies in the
                          # sort or filter steps.
 
-  return df, user_map, item_map
+  grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
+  eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
+
+  data = {
+    rconst.TRAIN_USER_KEY: train_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+    rconst.TRAIN_ITEM_KEY: train_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+    rconst.EVAL_USER_KEY: eval_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+    rconst.EVAL_ITEM_KEY: eval_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+    "user_map": user_map,
+    "item_map": item_map,
+    "create_time": time.time()
+  }
+
+  tf.logging.info("Writing raw data cache.")
+  with tf.gfile.Open(cache_path, "wb") as f:
+    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+  return data
 
 
 def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
@@ -204,8 +241,10 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
 
   st = timeit.default_timer()
   raw_rating_path = os.path.join(data_dir, dataset, movielens.RATINGS_FILE)
+  cache_path = os.path.join(data_dir, dataset, rconst.RAW_CACHE_FILE)
 
-  df, user_map, item_map = _filter_index_sort(raw_rating_path, match_mlperf)
+  raw_data = _filter_index_sort(raw_rating_path, cache_path, match_mlperf)
+  user_map, item_map = raw_data["user_map"], raw_data["item_map"]
   num_users, num_items = DATASET_TO_NUM_USERS_AND_ITEMS[dataset]
 
   if num_users != len(user_map):
@@ -217,23 +256,21 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
 
   ncf_dataset = NCFDataset(user_map=user_map, item_map=item_map,
                            num_data_readers=num_data_readers,
-                           num_train_positives=len(df) - len(user_map),
+                           num_train_positives=raw_data[rconst.TRAIN_USER_KEY].shape[0],
                            deterministic=deterministic)
 
-  # TODO(robieta): dump to file for MLPerf cache clear.
-  grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
-  eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
+  # TODO(robieta): MLPerf cache clear.
   producer = data_pipeline.MaterializedDataConstructor(
       maximum_number_epochs=params["train_epochs"],
       num_users=num_users,
       num_items=num_items,
-      train_pos_users=train_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
-      train_pos_items=train_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+      train_pos_users=raw_data[rconst.TRAIN_USER_KEY],
+      train_pos_items=raw_data[rconst.TRAIN_ITEM_KEY],
       train_batch_size=params["batch_size"],
       batches_per_train_step=params["batches_per_step"],
       num_train_negatives=params["num_neg"],
-      eval_pos_users=eval_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
-      eval_pos_items=eval_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+      eval_pos_users=raw_data[rconst.EVAL_USER_KEY],
+      eval_pos_items=raw_data[rconst.EVAL_ITEM_KEY],
       eval_batch_size=params["eval_batch_size"],
       batches_per_eval_step=params["batches_per_step"]
   )
@@ -277,7 +314,7 @@ def get_map_fn(is_training, params):
 
 
 def make_input_fn(producer, is_training, use_tpu):
-  # type: (data_pipeline.BaseDataConstructor, bool, bool)
+  # type: (data_pipeline.BaseDataConstructor, bool, bool) -> (typing.Callable, int)
   if use_tpu:
     raise NotImplementedError["TODO(robieta): StreamingFilesDataset"]
 

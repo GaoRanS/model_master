@@ -51,6 +51,9 @@ DUPLICATE_MASK = "duplicate_mask"
 HR_METRIC_NAME = "HR_METRIC"
 NDCG_METRIC_NAME = "NDCG_METRIC"
 
+RAW_CACHE_FILE = "raw_data_cache.pickle"
+CACHE_INVALIDATION_SEC = 3600 * 24
+
 # ==============================================================================
 # == Subprocess Data Generation ================================================
 # ==============================================================================
