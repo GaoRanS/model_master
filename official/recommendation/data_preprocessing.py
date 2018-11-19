@@ -253,20 +253,27 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
 
 
 
+def get_map_fn(is_training, params):
+  def item_cast(items):
+    if params["use_tpu"] or params["use_xla_for_gpu"]:
+        return tf.cast(items, tf.int32)  # TPU and XLA disallows uint16 infeed.
+    return items
 
-def _train_map_fn(x):
-    return {
-        movielens.USER_COLUMN: x[0],
-        movielens.ITEM_COLUMN: x[1],
-    }, x[2]
+  if is_training:
+    def map_fn(users, items, labels):
+        return {
+            movielens.USER_COLUMN: users,
+            movielens.ITEM_COLUMN: item_cast(items),
+        }, labels
+    return map_fn
 
-
-def _eval_map_fn(x):
-    return {
-        movielens.USER_COLUMN: x[0],
-        movielens.ITEM_COLUMN: x[1],
-        rconst.DUPLICATE_MASK: x[2],
-    }
+  def map_fn(users, items, duplicate_mask):
+      return {
+          movielens.USER_COLUMN: users,
+          movielens.ITEM_COLUMN: item_cast(items),
+          rconst.DUPLICATE_MASK: duplicate_mask,
+      }
+  return map_fn
 
 
 def make_input_fn(producer, is_training, use_tpu):
@@ -306,7 +313,7 @@ def make_input_fn(producer, is_training, use_tpu):
         generator=generator, output_types=output_types,
         output_shapes=output_shapes)
 
-    dataset = dataset.map(_train_map_fn if is_training else _eval_map_fn)
+    dataset = dataset.map(get_map_fn(is_training, params))
     dataset = dataset.prefetch(16)
 
     return dataset
