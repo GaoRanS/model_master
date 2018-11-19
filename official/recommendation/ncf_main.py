@@ -258,7 +258,7 @@ def run_ncf(_):
       train_input_fn, batch_count = data_preprocessing.make_input_fn(
           producer=producer, is_training=True, use_tpu=params["use_tpu"])
 
-      if batch_count != num_train_steps:
+      if batch_count != num_train_steps * params["batches_per_step"]:
         raise ValueError(
             "Step counts do not match. ({} vs. {}) The producer is "
             "producing incorrect shards.".format(batch_count, num_train_steps))
@@ -270,7 +270,7 @@ def run_ncf(_):
       eval_input_fn, eval_batch_count = data_preprocessing.make_input_fn(
           producer=producer, is_training=False, use_tpu=params["use_tpu"])
 
-      if eval_batch_count != num_eval_steps:
+      if eval_batch_count != num_eval_steps * params["batches_per_step"]:
         raise ValueError(
             "Step counts do not match. ({} vs. {}) The async process is "
             "producing incorrect shards.".format(
