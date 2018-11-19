@@ -372,6 +372,7 @@ def compute_eval_loss_and_metrics(logits,              # type: tf.Tensor
   Returns:
     An EstimatorSpec for evaluation.
   """
+  raise NotImplementedError("TODO(robieta): update to move positive to last position")
   in_top_k, ndcg, metric_weights, logits_by_user = compute_top_k_and_ndcg(
       logits, duplicate_mask, match_mlperf)
 

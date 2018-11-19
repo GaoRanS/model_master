@@ -162,17 +162,11 @@ def run_ncf(_):
     num_train_steps = data_preprocessing.SYNTHETIC_BATCHES_PER_EPOCH
     num_eval_steps = data_preprocessing.SYNTHETIC_BATCHES_PER_EPOCH
   else:
-    ncf_dataset, cleanup_fn = data_preprocessing.instantiate_pipeline(
-        dataset=FLAGS.dataset, data_dir=FLAGS.data_dir,
-        batch_size=batch_size,
-        eval_batch_size=eval_batch_size,
-        num_neg=FLAGS.num_neg,
-        epochs_per_cycle=FLAGS.epochs_between_evals,
-        num_cycles=total_training_cycle,
-        match_mlperf=FLAGS.ml_perf,
-        deterministic=FLAGS.seed is not None,
-        use_subprocess=FLAGS.use_subprocess,
+    ncf_dataset, cleanup_fn = data_preprocessing.construct_cache(
+        dataset=FLAGS.dataset, data_dir=FLAGS.data_dir, num_data_readers=None,
+        match_mlperf=FLAGS.ml_perf, deterministic=FLAGS.seed is not None,
         cache_id=FLAGS.cache_id)
+
     num_users = ncf_dataset.num_users
     num_items = ncf_dataset.num_items
     num_train_steps = int(np.ceil(
@@ -182,6 +176,16 @@ def run_ncf(_):
                                  ncf_dataset.num_users / eval_batch_size))
 
   model_helpers.apply_clean(flags.FLAGS)
+
+
+
+  print(ncf_dataset.cache_paths.positive_record)
+  print(num_users, num_items)
+  print(ncf_dataset.num_train_positives)
+  input("...")
+
+  return
+
 
   params = {
       "use_seed": FLAGS.seed is not None,

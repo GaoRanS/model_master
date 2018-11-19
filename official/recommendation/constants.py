@@ -17,6 +17,7 @@
 import os
 import time
 
+from official.datasets import movielens
 
 # ==============================================================================
 # == Main Thread Data Processing ===============================================
@@ -29,21 +30,27 @@ class Paths(object):
     self.data_dir = data_dir
     self.cache_root = os.path.join(
         self.data_dir, "{}_ncf_recommendation_cache".format(self.cache_id))
-    self.train_shard_subdir = os.path.join(self.cache_root,
-                                           "raw_training_shards")
-    self.train_shard_template = os.path.join(self.train_shard_subdir,
-                                             "positive_shard_{}.pickle")
-    self.train_epoch_dir = os.path.join(self.cache_root, "training_epochs")
-    self.eval_data_subdir = os.path.join(self.cache_root, "eval_data")
+    self.positive_dir = os.path.join(self.cache_root, "positives")
+    self.positive_record = os.path.join(self.positive_dir, "raw_data.tfrecords")
 
-    self.subproc_alive = os.path.join(self.cache_root, "subproc.alive")
+    # self.train_shard_subdir = os.path.join(self.cache_root,
+    #                                        "raw_training_shards")
+    # self.train_shard_template = os.path.join(self.train_shard_subdir,
+    #                                          "positive_shard_{}.pickle")
+    # self.train_epoch_dir = os.path.join(self.cache_root, "training_epochs")
+    # self.eval_data_subdir = os.path.join(self.cache_root, "eval_data")
+    #
+    # self.subproc_alive = os.path.join(self.cache_root, "subproc.alive")
 
 
 APPROX_PTS_PER_TRAIN_SHARD = 128000
 
 # Keys for data shards
-TRAIN_KEY = "train"
-EVAL_KEY = "eval"
+TRAIN_USER_KEY = "train_{}".format(movielens.USER_COLUMN)
+TRAIN_ITEM_KEY = "train_{}".format(movielens.ITEM_COLUMN)
+TRAIN_LABEL_KEY = "train_labels"
+EVAL_USER_KEY = "eval_{}".format(movielens.USER_COLUMN)
+EVAL_ITEM_KEY = "eval_{}".format(movielens.ITEM_COLUMN)
 
 # In both datasets, each user has at least 20 ratings.
 MIN_NUM_RATINGS = 20
