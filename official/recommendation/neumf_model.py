@@ -352,7 +352,7 @@ def compute_eval_loss_and_metrics(logits,              # type: tf.Tensor
   Args:
     logits: A tensor containing the predicted logits for each user. The shape
       of logits is (num_users_per_batch * (1 + NUM_EVAL_NEGATIVES),) Logits
-      for a user are grouped, and the first element of the group is the true
+      for a user are grouped, and the last element of the group is the true
       element.
 
     softmax_logits: The same tensor, but with zeros left-appended.
@@ -372,14 +372,13 @@ def compute_eval_loss_and_metrics(logits,              # type: tf.Tensor
   Returns:
     An EstimatorSpec for evaluation.
   """
-  raise NotImplementedError("TODO(robieta): update to move positive to last position")
   in_top_k, ndcg, metric_weights, logits_by_user = compute_top_k_and_ndcg(
       logits, duplicate_mask, match_mlperf)
 
   # Examples are provided by the eval Dataset in a structured format, so eval
   # labels can be reconstructed on the fly.
   eval_labels = tf.reshape(tf.one_hot(
-      tf.zeros(shape=(logits_by_user.shape[0],), dtype=tf.int32),
+      tf.zeros(shape=(logits_by_user.shape[0],), dtype=tf.int32) + rconst.NUM_EVAL_NEGATIVES,
       logits_by_user.shape[1], dtype=tf.int32), (-1,))
 
   eval_labels_float = tf.cast(eval_labels, tf.float32)
@@ -449,6 +448,10 @@ def compute_top_k_and_ndcg(logits,              # type: tf.Tensor
                                       (-1, rconst.NUM_EVAL_NEGATIVES + 1))
 
   if match_mlperf:
+    # TODO(robieta): if dupe mask is not used, need to account for the case when
+    #                eval item is in the negative examples. (since it is not at
+    #                the end.)
+
     # Set duplicate logits to the min value for that dtype. The MLPerf
     # reference dedupes during evaluation.
     logits_by_user *= (1 - duplicate_mask_by_user)
@@ -464,7 +467,7 @@ def compute_top_k_and_ndcg(logits,              # type: tf.Tensor
   # perform matrix multiplications very quickly. This is similar to np.argwhere.
   # However this is a special case because the target will only appear in
   # sort_indices once.
-  one_hot_position = tf.cast(tf.equal(sort_indices, 0), tf.int32)
+  one_hot_position = tf.cast(tf.equal(sort_indices, rconst.NUM_EVAL_NEGATIVES), tf.int32)
   sparse_positions = tf.multiply(
       one_hot_position, tf.range(logits_by_user.shape[1])[tf.newaxis, :])
   position_vector = tf.reduce_sum(sparse_positions, axis=1)

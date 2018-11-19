@@ -45,6 +45,7 @@ import tensorflow as tf
 
 from official.datasets import movielens
 from official.recommendation import constants as rconst
+from official.recommendation import data_pipeline
 from official.recommendation import stat_utils
 from official.recommendation import popen_helper
 from official.utils.logs import mlperf_helper
@@ -65,9 +66,9 @@ SYNTHETIC_BATCHES_PER_EPOCH = 2000
 class NCFDataset(object):
   """Container for training and testing data."""
 
-  def __init__(self, user_map, item_map, num_data_readers, cache_paths,
+  def __init__(self, user_map, item_map, num_data_readers,
                num_train_positives, deterministic=False):
-    # type: (dict, dict, int, rconst.Paths, int, bool) -> None
+    # type: (dict, dict, int, int, bool) -> None
     """Assign key values for recommendation dataset.
 
     Args:
@@ -86,7 +87,6 @@ class NCFDataset(object):
     self.num_users = len(user_map)
     self.num_items = len(item_map)
     self.num_data_readers = num_data_readers
-    self.cache_paths = cache_paths
     self.num_train_positives = num_train_positives
     self.deterministic = deterministic
 
@@ -185,50 +185,9 @@ def _filter_index_sort(raw_rating_path, match_mlperf):
   return df, user_map, item_map
 
 
-def write_positive_tfrecords(df, cache_paths):
-  grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
-  eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
-
-  tf.gfile.MakeDirs(cache_paths.positive_dir)
-
-  train_users = train_df[movielens.USER_COLUMN].values.astype(np.int32)
-  train_items = train_df[movielens.ITEM_COLUMN].values.astype(np.int32)
-
-  eval_users = eval_df[movielens.USER_COLUMN].values.astype(np.int32)
-  eval_items = eval_df[movielens.ITEM_COLUMN].values.astype(np.int32)
-
-  pickle_path = os.path.join(cache_paths.positive_dir, "positives.pickle")
-  with open(pickle_path, "wb") as f:
-    pickle.dump({
-      rconst.TRAIN_USER_KEY: train_users,
-      rconst.TRAIN_ITEM_KEY: train_items,
-      rconst.EVAL_USER_KEY: eval_users,
-      rconst.EVAL_ITEM_KEY: eval_items,
-    }, f, protocol=pickle.HIGHEST_PROTOCOL)
-  print(pickle_path)
-
-
-  def to_feature(inp):
-    return tf.train.Feature(
-        bytes_list=tf.train.BytesList(value=[memoryview(inp).tobytes()]))
-
-  feature_dict = {
-      rconst.TRAIN_USER_KEY: to_feature(train_users),
-      rconst.TRAIN_ITEM_KEY: to_feature(train_items),
-      rconst.EVAL_USER_KEY: to_feature(eval_users),
-      rconst.EVAL_ITEM_KEY: to_feature(eval_items),
-  }
-
-  # Do not use TFRecordWriter, as this is a single record.
-  with tf.gfile.Open(cache_paths.positive_record, "wb") as writer:
-    writer.write(tf.train.Example(
-        features=tf.train.Features(feature=feature_dict)
-    ).SerializeToString())
-
-
-def construct_cache(dataset, data_dir, num_data_readers, match_mlperf,
-                    deterministic, cache_id=None):
-  # type: (str, str, int, bool, bool, typing.Optional[int]) -> (NCFDataset, typing.Callable)
+def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
+                         deterministic, params):
+  # type: (str, str, typing.Optional[int], bool, bool, dict) -> (NCFDataset, typing.Callable)
   """Load and digest data CSV into a usable form.
 
   Args:
@@ -242,18 +201,8 @@ def construct_cache(dataset, data_dir, num_data_readers, match_mlperf,
       performance.
   """
   tf.logging.info("Beginning data preprocessing.")
-  tf.gfile.MakeDirs(data_dir)
-
-  cache_paths = rconst.Paths(data_dir=data_dir, cache_id=cache_id)
 
   st = timeit.default_timer()
-  cache_root = os.path.join(data_dir, cache_paths.cache_root)
-  if tf.gfile.Exists(cache_root):
-    raise ValueError("{} unexpectedly already exists."
-                     .format(cache_paths.cache_root))
-  tf.logging.info("Creating cache directory. This should be deleted on exit.")
-  tf.gfile.MakeDirs(cache_paths.cache_root)
-
   raw_rating_path = os.path.join(data_dir, dataset, movielens.RATINGS_FILE)
 
   df, user_map, item_map = _filter_index_sort(raw_rating_path, match_mlperf)
@@ -266,33 +215,34 @@ def construct_cache(dataset, data_dir, num_data_readers, match_mlperf,
     raise ValueError("Expected to find {} items, but found {}".format(
         num_items, len(item_map)))
 
-  write_positive_tfrecords(df, cache_paths)
-
   ncf_dataset = NCFDataset(user_map=user_map, item_map=item_map,
                            num_data_readers=num_data_readers,
-                           cache_paths=cache_paths,
                            num_train_positives=len(df) - len(user_map),
                            deterministic=deterministic)
 
+  # TODO(robieta): dump to file for MLPerf cache clear.
+  grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
+  eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
+  producer = data_pipeline.MaterializedDataConstructor(
+      maximum_number_epochs=params["train_epochs"],
+      num_users=num_users,
+      num_items=num_items,
+      train_pos_users=train_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+      train_pos_items=train_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+      train_batch_size=params["batch_size"],
+      batches_per_train_step=params["batches_per_step"],
+      num_train_negatives=params["num_neg"],
+      eval_pos_users=eval_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
+      eval_pos_items=eval_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
+      eval_batch_size=params["eval_batch_size"],
+      batches_per_eval_step=params["batches_per_step"]
+  )
+
   run_time = timeit.default_timer() - st
-  tf.logging.info("Cache construction complete. Time: {:.1f} sec."
+  tf.logging.info("Data preprocessing complete. Time: {:.1f} sec."
                   .format(run_time))
 
-  cleanup_called = {"finished": False}
-  @atexit.register
-  def cleanup():
-    """Remove artifacts used during training."""
-    if cleanup_called["finished"]:
-      return
-
-    try:
-      tf.gfile.DeleteRecursively(ncf_dataset.cache_paths.cache_root)
-    except tf.errors.NotFoundError:
-      pass
-
-    cleanup_called["finished"] = True
-
-  return ncf_dataset, cleanup
+  return ncf_dataset, producer
 
 
 
@@ -304,17 +254,64 @@ def construct_cache(dataset, data_dir, num_data_readers, match_mlperf,
 
 
 
+def _train_map_fn(x):
+    return {
+        movielens.USER_COLUMN: x[0],
+        movielens.ITEM_COLUMN: x[1],
+    }, x[2]
 
 
+def _eval_map_fn(x):
+    return {
+        movielens.USER_COLUMN: x[0],
+        movielens.ITEM_COLUMN: x[1],
+        rconst.DUPLICATE_MASK: x[2],
+    }
 
 
+def make_input_fn(producer, is_training, use_tpu):
+  # type: (data_pipeline.BaseDataConstructor, bool, bool)
+  if use_tpu:
+    raise NotImplementedError["TODO(robieta): StreamingFilesDataset"]
 
+  if isinstance(producer, data_pipeline.DummyConstructor):
+    return make_synthetic_input_fn(is_training=is_training)
 
+  if is_training:
+    num_batches = producer.train_batches_per_epoch
+    generator = producer.training_generator
+    batch_size = producer.train_batch_size
 
+    # users, items, labels
+    output_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE, rconst.LABEL_DTYPE)
+    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)])
+  else:
+    num_batches = producer.eval_batches_per_epoch
+    generator = producer.eval_generator
+    batch_size = producer.eval_batch_size
 
+    # users, items, duplicate_mask
+    output_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE,
+                    rconst.DUPE_MASK_DTYPE)
+    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)])
 
+  def input_fn(params):
+    param_batch_size = (params["batch_size"] if is_training else
+                        params["eval_batch_size"])
+    if batch_size != param_batch_size:
+      raise ValueError("producer batch size ({}) differs from params batch "
+                       "size ({})".format(batch_size, param_batch_size))
 
+    dataset = tf.data.Dataset.from_generator(
+        generator=generator, output_types=output_types,
+        output_shapes=output_shapes)
 
+    dataset = dataset.map(_train_map_fn if is_training else _eval_map_fn)
+    dataset = dataset.prefetch(16)
+
+    return dataset
+
+  return input_fn, num_batches
 
 
 
@@ -516,41 +513,41 @@ def construct_cache(dataset, data_dir, num_data_readers, match_mlperf,
 #   with tf.gfile.Open(ready_file, "r") as f:
 #     epoch_metadata = json.load(f)
 #   return epoch_metadata, record_dir, template
-#
-#
-# def make_synthetic_input_fn(is_training):
-#   """Construct training input_fn that uses synthetic data."""
-#   def input_fn(params):
-#     """Generated input_fn for the given epoch."""
-#     batch_size = (params["batch_size"] if is_training else
-#                   params["eval_batch_size"] or params["batch_size"])
-#     num_users = params["num_users"]
-#     num_items = params["num_items"]
-#
-#     users = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
-#                               maxval=num_users)
-#     items = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
-#                               maxval=num_items)
-#
-#     if is_training:
-#       labels = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
-#                                  maxval=2)
-#       data = {
-#           movielens.USER_COLUMN: users,
-#           movielens.ITEM_COLUMN: items,
-#       }, labels
-#     else:
-#       dupe_mask = tf.cast(tf.random_uniform([batch_size], dtype=tf.int32,
-#                                             minval=0, maxval=2), tf.bool)
-#       data = {
-#           movielens.USER_COLUMN: users,
-#           movielens.ITEM_COLUMN: items,
-#           rconst.DUPLICATE_MASK: dupe_mask,
-#       }
-#
-#     dataset = tf.data.Dataset.from_tensors(data).repeat(
-#         SYNTHETIC_BATCHES_PER_EPOCH)
-#     dataset = dataset.prefetch(32)
-#     return dataset
-#
-#   return input_fn, None, SYNTHETIC_BATCHES_PER_EPOCH
+
+
+def make_synthetic_input_fn(is_training):
+  """Construct training input_fn that uses synthetic data."""
+  def input_fn(params):
+    """Generated input_fn for the given epoch."""
+    batch_size = (params["batch_size"] if is_training else
+                  params["eval_batch_size"] or params["batch_size"])
+    num_users = params["num_users"]
+    num_items = params["num_items"]
+
+    users = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
+                              maxval=num_users)
+    items = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
+                              maxval=num_items)
+
+    if is_training:
+      labels = tf.random_uniform([batch_size], dtype=tf.int32, minval=0,
+                                 maxval=2)
+      data = {
+          movielens.USER_COLUMN: users,
+          movielens.ITEM_COLUMN: items,
+      }, labels
+    else:
+      dupe_mask = tf.cast(tf.random_uniform([batch_size], dtype=tf.int32,
+                                            minval=0, maxval=2), tf.bool)
+      data = {
+          movielens.USER_COLUMN: users,
+          movielens.ITEM_COLUMN: items,
+          rconst.DUPLICATE_MASK: dupe_mask,
+      }
+
+    dataset = tf.data.Dataset.from_tensors(data).repeat(
+        SYNTHETIC_BATCHES_PER_EPOCH)
+    dataset = dataset.prefetch(32)
+    return dataset
+
+  return input_fn, SYNTHETIC_BATCHES_PER_EPOCH

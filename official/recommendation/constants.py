@@ -14,36 +14,13 @@
 # ==============================================================================
 """Central location for NCF specific values."""
 
-import os
-import time
+import numpy as np
 
 from official.datasets import movielens
 
 # ==============================================================================
 # == Main Thread Data Processing ===============================================
 # ==============================================================================
-class Paths(object):
-  """Container for various path information used while training NCF."""
-
-  def __init__(self, data_dir, cache_id=None):
-    self.cache_id = cache_id or int(time.time())
-    self.data_dir = data_dir
-    self.cache_root = os.path.join(
-        self.data_dir, "{}_ncf_recommendation_cache".format(self.cache_id))
-    self.positive_dir = os.path.join(self.cache_root, "positives")
-    self.positive_record = os.path.join(self.positive_dir, "raw_data.tfrecords")
-
-    # self.train_shard_subdir = os.path.join(self.cache_root,
-    #                                        "raw_training_shards")
-    # self.train_shard_template = os.path.join(self.train_shard_subdir,
-    #                                          "positive_shard_{}.pickle")
-    # self.train_epoch_dir = os.path.join(self.cache_root, "training_epochs")
-    # self.eval_data_subdir = os.path.join(self.cache_root, "eval_data")
-    #
-    # self.subproc_alive = os.path.join(self.cache_root, "subproc.alive")
-
-
-APPROX_PTS_PER_TRAIN_SHARD = 128000
 
 # Keys for data shards
 TRAIN_USER_KEY = "train_{}".format(movielens.USER_COLUMN)
@@ -51,6 +28,11 @@ TRAIN_ITEM_KEY = "train_{}".format(movielens.ITEM_COLUMN)
 TRAIN_LABEL_KEY = "train_labels"
 EVAL_USER_KEY = "eval_{}".format(movielens.USER_COLUMN)
 EVAL_ITEM_KEY = "eval_{}".format(movielens.ITEM_COLUMN)
+
+USER_DTYPE = np.int32
+ITEM_DTYPE = np.uint16
+LABEL_DTYPE = np.int8
+DUPE_MASK_DTYPE = np.bool
 
 # In both datasets, each user has at least 20 ratings.
 MIN_NUM_RATINGS = 20
@@ -74,16 +56,3 @@ NDCG_METRIC_NAME = "NDCG_METRIC"
 # ==============================================================================
 CYCLES_TO_BUFFER = 3  # The number of train cycles worth of data to "run ahead"
                       # of the main training loop.
-
-FLAGFILE_TEMP = "flagfile.temp"
-FLAGFILE = "flagfile"
-READY_FILE_TEMP = "ready.json.temp"
-READY_FILE = "ready.json"
-
-TRAIN_RECORD_TEMPLATE = "train_{}.tfrecords"
-EVAL_RECORD_TEMPLATE = "eval_{}.tfrecords"
-
-TIMEOUT_SECONDS = 3600 * 2  # If the train loop goes more than two hours without
-                            # consuming an epoch of data, this is a good
-                            # indicator that the main thread is dead and the
-                            # subprocess is orphaned.

@@ -40,6 +40,7 @@ import tensorflow as tf
 from tensorflow.contrib.compiler import xla
 from official.datasets import movielens
 from official.recommendation import constants as rconst
+from official.recommendation import data_pipeline
 from official.recommendation import data_preprocessing
 from official.recommendation import model_runner
 from official.recommendation import neumf_model
@@ -124,6 +125,31 @@ def construct_estimator(num_gpus, model_dir, iterations, params, batch_size,
   return estimator, estimator
 
 
+def log_and_get_hooks(eval_batch_size):
+  # Create hooks that log information about the training and metric values
+  train_hooks = hooks_helper.get_train_hooks(
+      FLAGS.hooks,
+      model_dir=FLAGS.model_dir,
+      batch_size=FLAGS.batch_size,  # for ExamplesPerSecondHook
+      tensors_to_log={"cross_entropy": "cross_entropy"}
+  )
+  run_params = {
+    "batch_size": FLAGS.batch_size,
+    "eval_batch_size": eval_batch_size,
+    "number_factors": FLAGS.num_factors,
+    "hr_threshold": FLAGS.hr_threshold,
+    "train_epochs": FLAGS.train_epochs,
+  }
+  benchmark_logger = logger.get_benchmark_logger()
+  benchmark_logger.log_run_info(
+      model_name="recommendation",
+      dataset_name=FLAGS.dataset,
+      run_params=run_params,
+      test_id=FLAGS.benchmark_test_id)
+
+  return benchmark_logger, train_hooks
+
+
 def main(_):
   with logger.benchmark_context(FLAGS), \
        mlperf_helper.LOGGER(FLAGS.output_ml_perf_compliance_logging):
@@ -154,18 +180,43 @@ def run_ncf(_):
         "eval examples per user does not evenly divide eval_batch_size. "
         "Overriding to {}".format(eval_batch_size))
 
+  params = {
+    "train_epochs": FLAGS.train_epochs,
+    "batches_per_step": num_gpus or 1,
+    "use_seed": FLAGS.seed is not None,
+    "hash_pipeline": FLAGS.hash_pipeline,
+    "batch_size": batch_size,
+    "eval_batch_size": eval_batch_size,
+    "learning_rate": FLAGS.learning_rate,
+    "mf_dim": FLAGS.num_factors,
+    "model_layers": [int(layer) for layer in FLAGS.layers],
+    "mf_regularization": FLAGS.mf_regularization,
+    "mlp_reg_layers": [float(reg) for reg in FLAGS.mlp_regularization],
+    "num_neg": FLAGS.num_neg,
+    "use_tpu": FLAGS.tpu is not None,
+    "tpu": FLAGS.tpu,
+    "tpu_zone": FLAGS.tpu_zone,
+    "tpu_gcp_project": FLAGS.tpu_gcp_project,
+    "beta1": FLAGS.beta1,
+    "beta2": FLAGS.beta2,
+    "epsilon": FLAGS.epsilon,
+    "match_mlperf": FLAGS.ml_perf,
+    "use_xla_for_gpu": FLAGS.use_xla_for_gpu,
+    "use_estimator": FLAGS.use_estimator,
+  }
+
   if FLAGS.use_synthetic_data:
     ncf_dataset = None
-    cleanup_fn = lambda: None
+    producer = data_pipeline.DummyConstructor()
     num_users, num_items = data_preprocessing.DATASET_TO_NUM_USERS_AND_ITEMS[
         FLAGS.dataset]
     num_train_steps = data_preprocessing.SYNTHETIC_BATCHES_PER_EPOCH
     num_eval_steps = data_preprocessing.SYNTHETIC_BATCHES_PER_EPOCH
   else:
-    ncf_dataset, cleanup_fn = data_preprocessing.construct_cache(
+    ncf_dataset, producer = data_preprocessing.instantiate_pipeline(
         dataset=FLAGS.dataset, data_dir=FLAGS.data_dir, num_data_readers=None,
         match_mlperf=FLAGS.ml_perf, deterministic=FLAGS.seed is not None,
-        cache_id=FLAGS.cache_id)
+        params=params)
 
     num_users = ncf_dataset.num_users
     num_items = ncf_dataset.num_items
@@ -174,75 +225,24 @@ def run_ncf(_):
         (1 + FLAGS.num_neg) / FLAGS.batch_size))
     num_eval_steps = int(np.ceil((1 + rconst.NUM_EVAL_NEGATIVES) *
                                  ncf_dataset.num_users / eval_batch_size))
+  producer.start()
 
+  params["num_users"], params["num_items"] = num_users, num_items
   model_helpers.apply_clean(flags.FLAGS)
 
-
-
-  print(ncf_dataset.cache_paths.positive_record)
-  print(num_users, num_items)
-  print(ncf_dataset.num_train_positives)
-  input("...")
-
-  return
-
-
-  params = {
-      "use_seed": FLAGS.seed is not None,
-      "hash_pipeline": FLAGS.hash_pipeline,
-      "batch_size": batch_size,
-      "eval_batch_size": eval_batch_size,
-      "learning_rate": FLAGS.learning_rate,
-      "num_users": num_users,
-      "num_items": num_items,
-      "mf_dim": FLAGS.num_factors,
-      "model_layers": [int(layer) for layer in FLAGS.layers],
-      "mf_regularization": FLAGS.mf_regularization,
-      "mlp_reg_layers": [float(reg) for reg in FLAGS.mlp_regularization],
-      "num_neg": FLAGS.num_neg,
-      "use_tpu": FLAGS.tpu is not None,
-      "tpu": FLAGS.tpu,
-      "tpu_zone": FLAGS.tpu_zone,
-      "tpu_gcp_project": FLAGS.tpu_gcp_project,
-      "beta1": FLAGS.beta1,
-      "beta2": FLAGS.beta2,
-      "epsilon": FLAGS.epsilon,
-      "match_mlperf": FLAGS.ml_perf,
-      "use_xla_for_gpu": FLAGS.use_xla_for_gpu,
-      "use_estimator": FLAGS.use_estimator,
-  }
   if FLAGS.use_estimator:
     train_estimator, eval_estimator = construct_estimator(
         num_gpus=num_gpus, model_dir=FLAGS.model_dir,
         iterations=num_train_steps, params=params,
         batch_size=flags.FLAGS.batch_size, eval_batch_size=eval_batch_size)
   else:
-    runner = model_runner.NcfModelRunner(ncf_dataset, params, num_train_steps,
-                                         num_eval_steps, FLAGS.use_while_loop)
-
-  # Create hooks that log information about the training and metric values
-  train_hooks = hooks_helper.get_train_hooks(
-      FLAGS.hooks,
-      model_dir=FLAGS.model_dir,
-      batch_size=FLAGS.batch_size,  # for ExamplesPerSecondHook
-      tensors_to_log={"cross_entropy": "cross_entropy"}
-  )
-  run_params = {
-      "batch_size": FLAGS.batch_size,
-      "eval_batch_size": eval_batch_size,
-      "number_factors": FLAGS.num_factors,
-      "hr_threshold": FLAGS.hr_threshold,
-      "train_epochs": FLAGS.train_epochs,
-  }
-  benchmark_logger = logger.get_benchmark_logger()
-  benchmark_logger.log_run_info(
-      model_name="recommendation",
-      dataset_name=FLAGS.dataset,
-      run_params=run_params,
-      test_id=FLAGS.benchmark_test_id)
+    raise NotImplementedError
+    # runner = model_runner.NcfModelRunner(ncf_dataset, params, num_train_steps,
+    #                                      num_eval_steps, FLAGS.use_while_loop)
 
 
-  eval_input_fn = None
+  benchmark_logger, train_hooks = log_and_get_hooks(eval_batch_size)
+
   target_reached = False
   mlperf_helper.ncf_print(key=mlperf_helper.TAGS.TRAIN_LOOP)
   for cycle_index in range(total_training_cycle):
@@ -255,30 +255,26 @@ def run_ncf(_):
 
     # Train the model
     if FLAGS.use_estimator:
-      train_input_fn, train_record_dir, batch_count = \
-        data_preprocessing.make_input_fn(
-            ncf_dataset=ncf_dataset, is_training=True)
+      train_input_fn, batch_count = data_preprocessing.make_input_fn(
+          producer=producer, is_training=True, use_tpu=params["use_tpu"])
 
       if batch_count != num_train_steps:
         raise ValueError(
-            "Step counts do not match. ({} vs. {}) The async process is "
+            "Step counts do not match. ({} vs. {}) The producer is "
             "producing incorrect shards.".format(batch_count, num_train_steps))
 
       train_estimator.train(input_fn=train_input_fn, hooks=train_hooks,
                             steps=num_train_steps)
-      if train_record_dir:
-        tf.gfile.DeleteRecursively(train_record_dir)
 
       tf.logging.info("Beginning evaluation.")
-      if eval_input_fn is None:
-        eval_input_fn, _, eval_batch_count = data_preprocessing.make_input_fn(
-            ncf_dataset=ncf_dataset, is_training=False)
+      eval_input_fn, eval_batch_count = data_preprocessing.make_input_fn(
+          producer=producer, is_training=False, use_tpu=params["use_tpu"])
 
-        if eval_batch_count != num_eval_steps:
-          raise ValueError(
-              "Step counts do not match. ({} vs. {}) The async process is "
-              "producing incorrect shards.".format(
-                  eval_batch_count, num_eval_steps))
+      if eval_batch_count != num_eval_steps:
+        raise ValueError(
+            "Step counts do not match. ({} vs. {}) The async process is "
+            "producing incorrect shards.".format(
+                eval_batch_count, num_eval_steps))
 
       mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
                               value=cycle_index)
@@ -286,12 +282,14 @@ def run_ncf(_):
                                              steps=num_eval_steps)
       tf.logging.info("Evaluation complete.")
     else:
-      runner.train()
-      tf.logging.info("Beginning evaluation.")
-      mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
-                              value=cycle_index)
-      eval_results = runner.eval()
-      tf.logging.info("Evaluation complete.")
+      raise NotImplementedError
+      # runner.train()
+      # tf.logging.info("Beginning evaluation.")
+      # mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
+      #                         value=cycle_index)
+      # eval_results = runner.eval()
+      # tf.logging.info("Evaluation complete.")
+
     hr = float(eval_results[rconst.HR_KEY])
     ndcg = float(eval_results[rconst.NDCG_KEY])
 
@@ -324,7 +322,8 @@ def run_ncf(_):
 
   mlperf_helper.ncf_print(key=mlperf_helper.TAGS.RUN_STOP,
                           value={"success": target_reached})
-  cleanup_fn()  # Cleanup data construction artifacts and subprocess.
+  producer.stop_loop()
+  producer.join()
 
   # Clear the session explicitly to avoid session delete error
   tf.keras.backend.clear_session()

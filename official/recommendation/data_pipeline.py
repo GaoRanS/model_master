@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Run specific portions of the NCF data pipeline."""
+"""Asynchronous data producer for the NCF pipeline."""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -49,7 +49,6 @@ Eval:
 {spacer}Batch size:              {eval_batch_size}
 {spacer}Batch count per epoch:   {eval_batch_ct}"""
 
-
 class BaseDataConstructor(threading.Thread):
   def __init__(self,
                maximum_number_epochs,   # type: int
@@ -75,24 +74,24 @@ class BaseDataConstructor(threading.Thread):
     self._train_pos_items = train_pos_items
     assert self._train_pos_users.shape == self._train_pos_items.shape
     self._train_pos_count = self._train_pos_users.shape[0]
-    self._train_batch_size = train_batch_size
+    self.train_batch_size = train_batch_size
     self._num_train_negatives = num_train_negatives
     self._elements_in_epoch = (1 + num_train_negatives) * self._train_pos_count
     self._batches_per_train_step = batches_per_train_step
-    self._train_batches_per_epoch = self._count_batches(
+    self.train_batches_per_epoch = self._count_batches(
         self._elements_in_epoch, train_batch_size, batches_per_train_step)
 
     # Evaluation
     self._eval_pos_users = eval_pos_users
     self._eval_pos_items = eval_pos_items
-    self._eval_batch_size = eval_batch_size
+    self.eval_batch_size = eval_batch_size
     if eval_batch_size % (1 + rconst.NUM_EVAL_NEGATIVES):
       raise ValueError("Eval batch size {} is not divisible by {}".format(
           eval_batch_size, 1 + rconst.NUM_EVAL_NEGATIVES))
     self._eval_users_per_batch = int(
         eval_batch_size // (1 + rconst.NUM_EVAL_NEGATIVES))
     self._eval_elements_in_epoch = num_users * (1 + rconst.NUM_EVAL_NEGATIVES)
-    self._eval_batches_per_epoch = self._count_batches(
+    self.eval_batches_per_epoch = self._count_batches(
         self._eval_elements_in_epoch, eval_batch_size, batches_per_eval_step)
 
     # Intermediate artifacts
@@ -114,10 +113,10 @@ class BaseDataConstructor(threading.Thread):
     summary = SUMMARY_TEMPLATE.format(
         spacer="  ", num_users=self._num_users, num_items=self._num_items,
         train_pos_ct=self._train_pos_count,
-        train_batch_size=self._train_batch_size,
-        train_batch_ct=self._train_batches_per_epoch,
-        eval_pos_ct=self._num_users, eval_batch_size=self._eval_batch_size,
-        eval_batch_ct=self._eval_batches_per_epoch)
+        train_batch_size=self.train_batch_size,
+        train_batch_ct=self.train_batches_per_epoch,
+        eval_pos_ct=self._num_users, eval_batch_size=self.eval_batch_size,
+        eval_batch_ct=self.eval_batches_per_epoch)
     return super(BaseDataConstructor, self).__repr__() + "\n" + summary
 
   def _count_batches(self, example_count, batch_size, batches_per_step):
@@ -133,13 +132,13 @@ class BaseDataConstructor(threading.Thread):
       if self._current_epoch_order is None:
         self._current_epoch_order = self._shuffle_producer.get()
 
-      batch_indices = self._current_epoch_order[:self._train_batch_size]
-      self._current_epoch_order = self._current_epoch_order[self._train_batch_size:]
+      batch_indices = self._current_epoch_order[:self.train_batch_size]
+      self._current_epoch_order = self._current_epoch_order[self.train_batch_size:]
 
       if not self._current_epoch_order.shape[0]:
         self._current_epoch_order = self._shuffle_producer.get()
 
-      num_extra = self._train_batch_size - batch_indices.shape[0]
+      num_extra = self.train_batch_size - batch_indices.shape[0]
       if num_extra:
         batch_indices = np.concatenate([batch_indices,
                                         self._current_epoch_order[:num_extra]])
@@ -170,33 +169,32 @@ class BaseDataConstructor(threading.Thread):
     negative_indices = np.greater_equal(batch_indices, self._train_pos_count)
     negative_users = users[negative_indices]
 
-    negative_items = self.lookup_negative_items(
-      batch_indices=batch_indices, batch_ind_mod=batch_ind_mod, users=users,
-      negative_indices=negative_indices, negative_users=negative_users)
+    negative_items = self.lookup_negative_items(negative_users=negative_users)
 
     items = self._train_pos_items[batch_ind_mod]
     items[negative_indices] = negative_items
 
-    labels = np.logical_not(negative_indices).astype("int8")
+    labels = np.logical_not(negative_indices).astype(rconst.LABEL_DTYPE)
 
     self._training_queue.put((users, items, labels))
 
   def _wait_to_construct_train_epoch(self):
-    pass
-    # spin_threshold = rconst.CYCLES_TO_BUFFER * self._train_batches_per_epoch
-    # count = 0
-    # while self._training_queue.qsize() >= spin_threshold:
-    #   time.sleep(0.01)
-    #   count += 1
-    #   if count >= 100 and np.log10(count) == np.round(np.log10(count)):
-    #     tf.logging.info(
-    #         "Waited {} times for training data to be consumed".format(count))
+    threshold = rconst.CYCLES_TO_BUFFER * self.train_batches_per_epoch
+    count = 0
+    while self._training_queue.qsize() >= threshold and not self._stop_loop:
+      time.sleep(0.01)
+      count += 1
+      if count >= 100 and np.log10(count) == np.round(np.log10(count)):
+        tf.logging.info(
+            "Waited {} times for training data to be consumed".format(count))
 
   def _construct_training_epoch(self):
     self._wait_to_construct_train_epoch()
+    if self._stop_loop:
+      return
 
     start_time = timeit.default_timer()
-    map_args = [i for i in range(self._train_batches_per_epoch)]
+    map_args = [i for i in range(self.train_batches_per_epoch)]
     with multiprocessing.dummy.Pool(6) as pool:
       pool.map(self._get_training_batch, map_args)
 
@@ -222,7 +220,8 @@ class BaseDataConstructor(threading.Thread):
         .reshape(-1, rconst.NUM_EVAL_NEGATIVES),
     ], axis=1)
 
-    duplicate_mask = stat_utils.mask_duplicates(items, axis=1)
+    duplicate_mask = stat_utils.mask_duplicates(items, axis=1).astype(
+        rconst.DUPE_MASK_DTYPE)
 
     items[:, (0, -1)] = items[:, (-1, 0)]
     duplicate_mask[:, (0, -1)] = duplicate_mask[:, (-1, 0)]
@@ -240,8 +239,11 @@ class BaseDataConstructor(threading.Thread):
     return users.flatten(), items.flatten(), duplicate_mask.flatten()
 
   def _construct_eval_epoch(self):
+    if self._stop_loop:
+      return
+
     start_time = timeit.default_timer()
-    map_args = [i for i in range(self._eval_batches_per_epoch)]
+    map_args = [i for i in range(self.eval_batches_per_epoch)]
     with multiprocessing.dummy.Pool(6) as pool:
       eval_results = pool.map(self._get_eval_batch, map_args)
 
@@ -251,7 +253,7 @@ class BaseDataConstructor(threading.Thread):
         timeit.default_timer() - start_time))
 
   def training_generator(self):
-    for _ in range(self._train_batches_per_epoch):
+    for _ in range(self.train_batches_per_epoch):
       yield self._training_queue.get()
 
   def eval_generator(self):
@@ -260,6 +262,14 @@ class BaseDataConstructor(threading.Thread):
 
     for i in self._eval_results:
       yield i
+
+
+class DummyConstructor(threading.Thread):
+  def run(self):
+    pass
+
+  def stop_loop(self):
+    pass
 
 
 class MaterializedDataConstructor(BaseDataConstructor):
@@ -275,15 +285,15 @@ class MaterializedDataConstructor(BaseDataConstructor):
                                self._train_pos_users[:-1])[:, 0] + 1
     index_bounds = [0] + inner_bounds.tolist() + [self._num_users]
     self._negative_table = np.zeros(shape=(self._num_users, self._num_items),
-                                    dtype=np.uint16)
+                                    dtype=rconst.ITEM_DTYPE)
 
     # Set the table to the max value to make sure the embedding lookup will fail
     # if we go out of bounds, rather than just overloading item zero.
-    self._negative_table += np.iinfo(np.uint16).max
-    assert self._num_items < np.iinfo(np.uint16).max
+    self._negative_table += np.iinfo(rconst.ITEM_DTYPE).max
+    assert self._num_items < np.iinfo(rconst.ITEM_DTYPE).max
 
     # Reuse arange during generation. np.delete will make a copy.
-    full_set = np.arange(self._num_items, dtype=np.uint16)
+    full_set = np.arange(self._num_items, dtype=rconst.ITEM_DTYPE)
 
     self._per_user_neg_count = np.zeros(
       shape=(self._num_users,), dtype=np.int32)
