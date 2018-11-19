@@ -167,6 +167,10 @@ def run_ncf(_):
     np.random.seed(FLAGS.seed)
 
   num_gpus = flags_core.get_num_gpus(FLAGS)
+
+  # TODO(robieta): TPU shards
+  num_devices = num_gpus or 1
+
   batch_size = distribution_utils.per_device_batch_size(
       int(FLAGS.batch_size), num_gpus)
   total_training_cycle = FLAGS.train_epochs // FLAGS.epochs_between_evals
@@ -174,11 +178,13 @@ def run_ncf(_):
   eval_per_user = rconst.NUM_EVAL_NEGATIVES + 1
   eval_batch_size = int(FLAGS.eval_batch_size or
                         max([FLAGS.batch_size, eval_per_user]))
-  if eval_batch_size % eval_per_user:
-    eval_batch_size = eval_batch_size // eval_per_user * eval_per_user
+  if eval_batch_size % eval_per_user * num_devices:
+    eval_batch_size = (eval_batch_size // (eval_per_user * num_devices) *
+                       eval_per_user * num_devices)
+    device_warning = "" if num_devices == 1 else " times number of devices"
     tf.logging.warning(
-        "eval examples per user does not evenly divide eval_batch_size. "
-        "Overriding to {}".format(eval_batch_size))
+        "eval examples per user{} does not evenly divide eval_batch_size. "
+        "Overriding to {}".format(device_warning, eval_batch_size))
 
   params = {
     "train_epochs": FLAGS.train_epochs,
@@ -223,8 +229,9 @@ def run_ncf(_):
     num_train_steps = int(np.ceil(
         FLAGS.epochs_between_evals * ncf_dataset.num_train_positives *
         (1 + FLAGS.num_neg) / FLAGS.batch_size))
-    num_eval_steps = int(np.ceil((1 + rconst.NUM_EVAL_NEGATIVES) *
-                                 ncf_dataset.num_users / eval_batch_size))
+    num_eval_steps = int(np.ceil(
+        (1 + rconst.NUM_EVAL_NEGATIVES) *
+        ncf_dataset.num_users / eval_batch_size / num_devices) * num_devices)
   producer.start()
 
   params["num_users"], params["num_items"] = num_users, num_items
