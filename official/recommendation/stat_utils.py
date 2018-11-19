@@ -98,10 +98,12 @@ class AsyncPermuter(threading.Thread):
     self._stop_loop = True
 
 
-def slightly_biased_randint(max_val_vector):
-  samples = np.random.randint(low=0, high=np.iinfo(np.int32).max,
-                              size=max_val_vector.shape, dtype=np.int32)
-  return np.mod(samples, max_val_vector)
+def very_slightly_biased_randint(max_val_vector):
+  sample_dtype = np.uint64
+  out_dtype = max_val_vector.dtype
+  samples = np.random.randint(low=0, high=np.iinfo(sample_dtype).max,
+                              size=max_val_vector.shape, dtype=sample_dtype)
+  return np.mod(samples, max_val_vector.astype(sample_dtype)).astype(out_dtype)
 
 
 def mask_duplicates(x, axis=1):  # type: (np.ndarray, int) -> np.ndarray

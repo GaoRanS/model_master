@@ -311,7 +311,7 @@ class MaterializedDataConstructor(BaseDataConstructor):
       timeit.default_timer() - start_time))
 
   def lookup_negative_items(self, negative_users, **kwargs):
-    negative_item_choice = stat_utils.slightly_biased_randint(
+    negative_item_choice = stat_utils.very_slightly_biased_randint(
       self._per_user_neg_count[negative_users])
     return self._negative_table[negative_users, negative_item_choice]
 
