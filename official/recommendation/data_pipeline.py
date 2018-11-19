@@ -220,6 +220,15 @@ class BaseDataConstructor(threading.Thread):
         .reshape(-1, rconst.NUM_EVAL_NEGATIVES),
     ], axis=1)
 
+    # We pad the users and items here so that the duplicate mask calculation
+    # will include the padding. The metric function relies on every element
+    # except the positive being marked as duplicate to mask out padded points.
+    if users.shape[0] < self._eval_users_per_batch:
+      pad_rows = self._eval_users_per_batch - users.shape[0]
+      padding = np.zeros(shape=(pad_rows, users.shape[1]), dtype=np.int32)
+      users = np.concatenate([users, padding.astype(users.dtype)], axis=0)
+      items = np.concatenate([items, padding.astype(items.dtype)], axis=0)
+
     duplicate_mask = stat_utils.mask_duplicates(items, axis=1).astype(
         rconst.DUPE_MASK_DTYPE)
 
@@ -227,14 +236,6 @@ class BaseDataConstructor(threading.Thread):
     duplicate_mask[:, (0, -1)] = duplicate_mask[:, (-1, 0)]
 
     assert users.shape == items.shape == duplicate_mask.shape
-
-    if users.shape[0] < self._eval_users_per_batch:
-      pad_rows = self._eval_users_per_batch - users.shape[0]
-      padding = np.zeros(shape=(pad_rows, users.shape[1]), dtype=np.int32)
-      users = np.concatenate([users, padding.astype(users.dtype)], axis=0)
-      items = np.concatenate([items, padding.astype(items.dtype)], axis=0)
-      duplicate_mask = np.concatenate([duplicate_mask,
-                                       padding.astype(users.dtype)], axis=0)
 
     return users.flatten(), items.flatten(), duplicate_mask.flatten()
 
