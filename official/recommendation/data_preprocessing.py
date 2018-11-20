@@ -299,10 +299,11 @@ def get_map_fn(is_training, params):
     return items
 
   if is_training:
-    def map_fn(users, items, labels):
+    def map_fn(users, items, labels, mask_start):
         return {
             movielens.USER_COLUMN: users,
             movielens.ITEM_COLUMN: item_cast(items),
+            rconst.MASK_START_INDEX: mask_start,
         }, labels
     return map_fn
 
@@ -330,7 +331,8 @@ def make_input_fn(producer, is_training, use_tpu):
 
     # users, items, labels
     output_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE, rconst.LABEL_DTYPE)
-    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)])
+    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)] +
+                         [tf.TensorShape([])])
   else:
     num_batches = producer.eval_batches_per_epoch
     generator = producer.eval_generator

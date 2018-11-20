@@ -185,6 +185,8 @@ def run_ncf(_):
     tf.logging.warning(
         "eval examples per user{} does not evenly divide eval_batch_size. "
         "Overriding to {}".format(device_warning, eval_batch_size))
+  eval_batch_size = distribution_utils.per_device_batch_size(
+      eval_batch_size, num_gpus)
 
   params = {
     "train_epochs": FLAGS.train_epochs,
@@ -231,7 +233,7 @@ def run_ncf(_):
         (1 + FLAGS.num_neg) / FLAGS.batch_size))
     num_eval_steps = int(np.ceil(
         (1 + rconst.NUM_EVAL_NEGATIVES) *
-        ncf_dataset.num_users / eval_batch_size / num_devices) * num_devices)
+        ncf_dataset.num_users / eval_batch_size / num_devices))
   producer.start()
 
   params["num_users"], params["num_items"] = num_users, num_items

@@ -95,10 +95,10 @@ class BaseDataConstructor(threading.Thread):
         self._eval_elements_in_epoch, eval_batch_size, batches_per_eval_step)
 
     # Intermediate artifacts
-    self._current_epoch_order = None
+    self._current_epoch_order = np.empty(shape=(0,))
     self._shuffle_producer = stat_utils.AsyncPermuter(
         self._elements_in_epoch, num_workers=3,
-        num_to_produce=maximum_number_epochs+1)  # one extra for spillover.
+        num_to_produce=maximum_number_epochs)
     self._training_queue = queue.Queue()
     self._eval_results = None
     self._eval_batches = None
@@ -129,14 +129,11 @@ class BaseDataConstructor(threading.Thread):
 
   def _get_order_chunk(self):
     with self._current_epoch_order_lock:
-      if self._current_epoch_order is None:
+      if not self._current_epoch_order.shape[0]:
         self._current_epoch_order = self._shuffle_producer.get()
 
       batch_indices = self._current_epoch_order[:self.train_batch_size]
       self._current_epoch_order = self._current_epoch_order[self.train_batch_size:]
-
-      if not self._current_epoch_order.shape[0]:
-        self._current_epoch_order = self._shuffle_producer.get()
 
       num_extra = self.train_batch_size - batch_indices.shape[0]
       if num_extra:
@@ -176,7 +173,20 @@ class BaseDataConstructor(threading.Thread):
 
     labels = np.logical_not(negative_indices).astype(rconst.LABEL_DTYPE)
 
-    self._training_queue.put((users, items, labels))
+    # Pad last partial batch
+    pad_length = self.train_batch_size - batch_indices.shape[0]
+    if pad_length:
+      # We pad with arange rather than zeros because the network will still
+      # compute logits for padded examples, and padding with zeros would create
+      # a very "hot" embedding key which can have performance implications.
+      user_pad = np.arange(pad_length, dtype=users.dtype) % self._num_users
+      item_pad = np.arange(pad_length, dtype=items.dtype) % self._num_items
+      label_pad = np.zeros(shape=(pad_length,), dtype=labels.dtype)
+      users = np.concatenate([users, user_pad])
+      items = np.concatenate([items, item_pad])
+      labels = np.concatenate([labels, label_pad])
+
+    self._training_queue.put((users, items, labels, batch_indices.shape[0]))
 
   def _wait_to_construct_train_epoch(self):
     threshold = rconst.CYCLES_TO_BUFFER * self.train_batches_per_epoch

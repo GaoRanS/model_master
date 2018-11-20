@@ -114,6 +114,8 @@ def neumf_model_fn(features, labels, mode, params):
 
   elif mode == tf.estimator.ModeKeys.TRAIN:
     labels = tf.cast(labels, tf.int32)
+    valid_pt_mask = tf.less(tf.range(labels.shape[0]),
+                            features[rconst.MASK_START_INDEX])
 
     mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_NAME, value="adam")
     mlperf_helper.ncf_print(key=mlperf_helper.TAGS.OPT_LR,
@@ -135,7 +137,8 @@ def neumf_model_fn(features, labels, mode, params):
                             value=mlperf_helper.TAGS.BCE)
     loss = tf.losses.sparse_softmax_cross_entropy(
         labels=labels,
-        logits=softmax_logits
+        logits=softmax_logits,
+        weights=tf.cast(valid_pt_mask, tf.float32)
     )
 
     # This tensor is used by logging hooks.
