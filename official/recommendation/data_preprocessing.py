@@ -254,10 +254,10 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
     raise ValueError("Expected to find {} items, but found {}".format(
         num_items, len(item_map)))
 
-  ncf_dataset = NCFDataset(user_map=user_map, item_map=item_map,
-                           num_data_readers=num_data_readers,
-                           num_train_positives=raw_data[rconst.TRAIN_USER_KEY].shape[0],
-                           deterministic=deterministic)
+  ncf_dataset = NCFDataset(
+      user_map=user_map, item_map=item_map, num_data_readers=num_data_readers,
+      num_train_positives=raw_data[rconst.TRAIN_USER_KEY].shape[0],
+      deterministic=deterministic)
 
   # TODO(robieta): MLPerf cache clear.
   producer = data_pipeline.MaterializedDataConstructor(
@@ -282,14 +282,6 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
   print(producer)
 
   return ncf_dataset, producer
-
-
-
-
-
-
-
-
 
 
 def get_map_fn(is_training, params):
@@ -328,20 +320,14 @@ def make_input_fn(producer, is_training, use_tpu):
     num_batches = producer.train_batches_per_epoch
     generator = producer.training_generator
     batch_size = producer.train_batch_size
-
-    # users, items, labels
-    output_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE, rconst.LABEL_DTYPE)
-    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)] +
-                         [tf.TensorShape([])])
+    output_types = producer.train_gen_types
+    output_shapes = producer.train_gen_shapes
   else:
     num_batches = producer.eval_batches_per_epoch
     generator = producer.eval_generator
     batch_size = producer.eval_batch_size
-
-    # users, items, duplicate_mask
-    output_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE,
-                    rconst.DUPE_MASK_DTYPE)
-    output_shapes= tuple([tf.TensorShape([batch_size]) for _ in range(3)])
+    output_types = producer.eval_gen_types
+    output_shapes = producer.eval_gen_shapes
 
   def input_fn(params):
     param_batch_size = (params["batch_size"] if is_training else
@@ -362,11 +348,7 @@ def make_input_fn(producer, is_training, use_tpu):
   return input_fn, num_batches
 
 
-
-
-
-
-
+# TODO(robieta): Some of this will be used for StreamingFilesDataset
 # def make_deserialize(params, batch_size, training=False):
 #   """Construct deserialize function for training and eval fns."""
 #   feature_map = {

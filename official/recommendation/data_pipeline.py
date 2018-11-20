@@ -109,6 +109,19 @@ class BaseDataConstructor(threading.Thread):
     self.daemon = True
     self._stop_loop = False
 
+    # Generator annotations
+    self.train_gen_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE,
+                            rconst.LABEL_DTYPE, np.int32)
+    self.train_gen_shapes = (tf.TensorShape([self.train_batch_size]),
+                             tf.TensorShape([self.train_batch_size]),
+                             tf.TensorShape([self.train_batch_size]),
+                             tf.TensorShape([]))
+
+    self.eval_gen_types = (rconst.USER_DTYPE, rconst.ITEM_DTYPE,
+                           rconst.DUPE_MASK_DTYPE)
+    self.eval_gen_shapes = tuple([tf.TensorShape([self.eval_batch_size])
+                                  for _ in range(3)])
+
   def __repr__(self):
     summary = SUMMARY_TEMPLATE.format(
         spacer="  ", num_users=self._num_users, num_items=self._num_items,

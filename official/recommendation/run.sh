@@ -64,10 +64,13 @@ do
                      --dataset ${DATASET} --hooks "" \
                      ${DEVICE_FLAG} \
                      --clean \
-                     --train_epochs 20 \
-                     --batch_size 2048 \
-                     --eval_batch_size 100000 \
-                     --learning_rate 0.0005 \
+                     --train_epochs 14 \
+                     --batch_size 98304 \
+                     --eval_batch_size 160000 \
+                     --learning_rate 0.00382059 \
+                     --beta1 0.783529 \
+                     --beta2 0.909003 \
+                     --epsilon 1.45439e-07 \
                      --layers 256,256,128,64 --num_factors 64 \
                      --hr_threshold 0.635 \
                      --ml_perf \
