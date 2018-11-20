@@ -27,7 +27,7 @@ mkdir -p ${LOCAL_TEST_DIR}
 
 TPU=${TPU:-""}
 if [[ -z ${TPU} ]]; then
-  DEVICE_FLAG="--num_gpus -1 --use_xla_for_gpu"
+  DEVICE_FLAG="--num_gpus -1" # --use_xla_for_gpu"
 else
   DEVICE_FLAG="--tpu ${TPU} --num_gpus 0"
 fi
