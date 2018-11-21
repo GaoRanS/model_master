@@ -230,7 +230,7 @@ def run_ncf(_):
   train_estimator, eval_estimator = construct_estimator(
       model_dir=FLAGS.model_dir, iterations=num_train_steps, params=params)
 
-  benchmark_logger, train_hooks = log_and_get_hooks(eval_batch_size)
+  benchmark_logger, train_hooks = log_and_get_hooks(params["eval_batch_size"])
 
   target_reached = False
   mlperf_helper.ncf_print(key=mlperf_helper.TAGS.TRAIN_LOOP)
