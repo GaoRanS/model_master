@@ -41,12 +41,12 @@ SUMMARY_TEMPLATE = """General:
 
 Training:
 {spacer}Positive count:          {train_pos_ct}
-{spacer}Batch size:              {train_batch_size}
+{spacer}Batch size:              {train_batch_size} {multiplier}
 {spacer}Batch count per epoch:   {train_batch_ct}
 
 Eval:
 {spacer}Positive count:          {eval_pos_ct}
-{spacer}Batch size:              {eval_batch_size}
+{spacer}Batch size:              {eval_batch_size} {multiplier}
 {spacer}Batch count per epoch:   {eval_batch_ct}"""
 
 class BaseDataConstructor(threading.Thread):
@@ -129,7 +129,9 @@ class BaseDataConstructor(threading.Thread):
         train_batch_size=self.train_batch_size,
         train_batch_ct=self.train_batches_per_epoch,
         eval_pos_ct=self._num_users, eval_batch_size=self.eval_batch_size,
-        eval_batch_ct=self.eval_batches_per_epoch)
+        eval_batch_ct=self.eval_batches_per_epoch,
+        multiplier = "(x{} devices)".format(self._batches_per_train_step) if
+        self._batches_per_train_step > 1 else "")
     return super(BaseDataConstructor, self).__repr__() + "\n" + summary
 
   def _count_batches(self, example_count, batch_size, batches_per_step):
@@ -142,9 +144,6 @@ class BaseDataConstructor(threading.Thread):
 
   def _get_order_chunk(self):
     with self._current_epoch_order_lock:
-      if not self._current_epoch_order.shape[0]:
-        self._current_epoch_order = self._shuffle_producer.get()
-
       batch_indices = self._current_epoch_order[:self.train_batch_size]
       self._current_epoch_order = self._current_epoch_order[self.train_batch_size:]
 
@@ -218,6 +217,8 @@ class BaseDataConstructor(threading.Thread):
 
     start_time = timeit.default_timer()
     map_args = [i for i in range(self.train_batches_per_epoch)]
+    assert self._current_epoch_order.shape[0]
+    self._current_epoch_order = self._shuffle_producer.get()
     with multiprocessing.dummy.Pool(6) as pool:
       pool.map(self._get_training_batch, map_args)
 
