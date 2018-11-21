@@ -217,7 +217,7 @@ class BaseDataConstructor(threading.Thread):
 
     start_time = timeit.default_timer()
     map_args = [i for i in range(self.train_batches_per_epoch)]
-    assert self._current_epoch_order.shape[0]
+    assert not self._current_epoch_order.shape[0]
     self._current_epoch_order = self._shuffle_producer.get()
     with multiprocessing.dummy.Pool(6) as pool:
       pool.map(self._get_training_batch, map_args)
