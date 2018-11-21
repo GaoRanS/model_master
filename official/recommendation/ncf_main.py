@@ -42,7 +42,6 @@ from official.datasets import movielens
 from official.recommendation import constants as rconst
 from official.recommendation import data_pipeline
 from official.recommendation import data_preprocessing
-from official.recommendation import model_runner
 from official.recommendation import neumf_model
 from official.utils.flags import core as flags_core
 from official.utils.logs import hooks_helper
@@ -470,30 +469,6 @@ def define_ncf_flags():
   @flags.multi_flags_validator(["use_xla_for_gpu", "tpu"], message=xla_message)
   def xla_validator(flag_dict):
     return not flag_dict["use_xla_for_gpu"] or not flag_dict["tpu"]
-
-  flags.DEFINE_bool(
-      name="use_estimator", default=True, help=flags_core.help_wrap(
-          "If True, use Estimator to train. Setting to False is slightly "
-          "faster, but when False, the following are currently unsupported:\n"
-          "  * Using TPUs\n"
-          "  * Using more than 1 GPU\n"
-          "  * Reloading from checkpoints\n"
-          "  * Any hooks specified with --hooks\n"))
-
-  flags.DEFINE_bool(
-      name="use_while_loop", default=None, help=flags_core.help_wrap(
-          "If set, run an entire epoch in a session.run() call using a "
-          "TensorFlow while loop. This can improve performance, but will not "
-          "print out losses throughout the epoch. Requires "
-          "--use_estimator=false"
-      ))
-
-  xla_message = "--use_while_loop requires --use_estimator=false"
-  @flags.multi_flags_validator(["use_while_loop", "use_estimator"],
-                               message=xla_message)
-  def while_loop_validator(flag_dict):
-    return (not flag_dict["use_while_loop"] or
-            not flag_dict["use_estimator"])
 
 
 if __name__ == "__main__":
