@@ -57,6 +57,11 @@ DATASET_TO_NUM_USERS_AND_ITEMS = {
 }
 
 
+_EXPECTED_CACHE_KEYS = (
+  rconst.TRAIN_USER_KEY, rconst.TRAIN_ITEM_KEY, rconst.EVAL_USER_KEY,
+  rconst.EVAL_ITEM_KEY, rconst.USER_MAP, rconst.ITEM_MAP)
+
+
 # Number of batches to run per epoch when using synthetic data. At high batch
 # sizes, we run for more batches than with real data, which is good since
 # running more batches reduces noise when measuring the average batches/second.
@@ -125,100 +130,101 @@ def _filter_index_sort(raw_rating_path, cache_path, match_mlperf):
     IDs to regularized user IDs, and a dict mapping raw item IDs to regularized
     item IDs.
   """
-  if tf.gfile.Exists(cache_path):
+  valid_cache = tf.gfile.Exists(cache_path)
+  if valid_cache:
     with tf.gfile.Open(cache_path, "rb") as f:
       cached_data = pickle.load(f)
 
     cache_age = time.time() - cached_data.get("create_time", 0)
     if cache_age > rconst.CACHE_INVALIDATION_SEC:
-      tf.logging.info("Removing raw data cache file")
+      valid_cache = False
+
+    for key in _EXPECTED_CACHE_KEYS:
+      if key not in cached_data:
+        valid_cache = False
+
+    if not valid_cache:
+      tf.logging.info("Removing stale raw data cache file.")
       tf.gfile.Remove(cache_path)
-    else:
-      try:
-        for key in [rconst.TRAIN_USER_KEY, rconst.TRAIN_ITEM_KEY,
-                    rconst.EVAL_USER_KEY, rconst.EVAL_ITEM_KEY, "user_map",
-                    "item_map"]:
-          if key not in cached_data:
-            raise KeyError
-        return cached_data
-      except KeyError:
-        tf.logging.error("Invalid cache file.")
-        tf.gfile.Remove(cache_path)
 
-  with tf.gfile.Open(raw_rating_path) as f:
-    df = pd.read_csv(f)
+  if valid_cache:
+    data = cached_data
+  else:
+    with tf.gfile.Open(raw_rating_path) as f:
+      df = pd.read_csv(f)
 
-  # Get the info of users who have more than 20 ratings on items
-  grouped = df.groupby(movielens.USER_COLUMN)
-  df = grouped.filter(
-      lambda x: len(x) >= rconst.MIN_NUM_RATINGS) # type: pd.DataFrame
+    # Get the info of users who have more than 20 ratings on items
+    grouped = df.groupby(movielens.USER_COLUMN)
+    df = grouped.filter(
+        lambda x: len(x) >= rconst.MIN_NUM_RATINGS) # type: pd.DataFrame
 
-  original_users = df[movielens.USER_COLUMN].unique()
-  original_items = df[movielens.ITEM_COLUMN].unique()
+    original_users = df[movielens.USER_COLUMN].unique()
+    original_items = df[movielens.ITEM_COLUMN].unique()
 
-  mlperf_helper.ncf_print(key=mlperf_helper.TAGS.PREPROC_HP_MIN_RATINGS,
-                          value=rconst.MIN_NUM_RATINGS)
+    # Map the ids of user and item to 0 based index for following processing
+    tf.logging.info("Generating user_map and item_map...")
+    user_map = {user: index for index, user in enumerate(original_users)}
+    item_map = {item: index for index, item in enumerate(original_items)}
 
-  # Map the ids of user and item to 0 based index for following processing
-  tf.logging.info("Generating user_map and item_map...")
-  user_map = {user: index for index, user in enumerate(original_users)}
-  item_map = {item: index for index, item in enumerate(original_items)}
+    df[movielens.USER_COLUMN] = df[movielens.USER_COLUMN].apply(
+        lambda user: user_map[user])
+    df[movielens.ITEM_COLUMN] = df[movielens.ITEM_COLUMN].apply(
+        lambda item: item_map[item])
 
-  df[movielens.USER_COLUMN] = df[movielens.USER_COLUMN].apply(
-      lambda user: user_map[user])
-  df[movielens.ITEM_COLUMN] = df[movielens.ITEM_COLUMN].apply(
-      lambda item: item_map[item])
+    num_users = len(original_users)
+    num_items = len(original_items)
 
-  num_users = len(original_users)
-  num_items = len(original_items)
+    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.PREPROC_HP_NUM_EVAL,
+                            value=rconst.NUM_EVAL_NEGATIVES)
+    mlperf_helper.ncf_print(
+        key=mlperf_helper.TAGS.PREPROC_HP_SAMPLE_EVAL_REPLACEMENT,
+        value=match_mlperf)
 
-  mlperf_helper.ncf_print(key=mlperf_helper.TAGS.PREPROC_HP_NUM_EVAL,
-                          value=rconst.NUM_EVAL_NEGATIVES)
-  mlperf_helper.ncf_print(
-      key=mlperf_helper.TAGS.PREPROC_HP_SAMPLE_EVAL_REPLACEMENT,
-      value=match_mlperf)
+    assert num_users <= np.iinfo(rconst.USER_DTYPE).max
+    assert num_items <= np.iinfo(rconst.ITEM_DTYPE).max
+    assert df[movielens.USER_COLUMN].max() == num_users - 1
+    assert df[movielens.ITEM_COLUMN].max() == num_items - 1
 
-  assert num_users <= np.iinfo(np.int32).max
-  assert num_items <= np.iinfo(np.uint16).max
-  assert df[movielens.USER_COLUMN].max() == num_users - 1
-  assert df[movielens.ITEM_COLUMN].max() == num_items - 1
+    # This sort is used to shard the dataframe by user, and later to select
+    # the last item for a user to be used in validation.
+    tf.logging.info("Sorting by user, timestamp...")
 
-  # This sort is used to shard the dataframe by user, and later to select
-  # the last item for a user to be used in validation.
-  tf.logging.info("Sorting by user, timestamp...")
-
-  if match_mlperf:
-    # This sort is equivalent to the non-MLPerf sort, except that the order of
-    # items with the same user and timestamp are sometimes different. For some
-    # reason, this sort results in a better hit-rate during evaluation, matching
-    # the performance of the MLPerf reference implementation.
+    # This sort is equivalent to
+    #   df.sort_values([movielens.USER_COLUMN, movielens.TIMESTAMP_COLUMN],
+    #   inplace=True)
+    # except that the order of items with the same user and timestamp are
+    # sometimes different. For some reason, this sort results in a better
+    # hit-rate during evaluation, matching the performance of the MLPerf
+    # reference implementation.
     df.sort_values(by=movielens.TIMESTAMP_COLUMN, inplace=True)
     df.sort_values([movielens.USER_COLUMN, movielens.TIMESTAMP_COLUMN],
                    inplace=True, kind="mergesort")
-  else:
-    df.sort_values([movielens.USER_COLUMN, movielens.TIMESTAMP_COLUMN],
-                   inplace=True)
 
-  df = df.reset_index()  # The dataframe does not reconstruct indicies in the
-                         # sort or filter steps.
+    df = df.reset_index()  # The dataframe does not reconstruct indices in the
+                           # sort or filter steps.
 
-  grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
-  eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
+    grouped = df.groupby(movielens.USER_COLUMN, group_keys=False)
+    eval_df, train_df = grouped.tail(1), grouped.apply(lambda x: x.iloc[:-1])
 
-  data = {
-    rconst.TRAIN_USER_KEY: train_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
-    rconst.TRAIN_ITEM_KEY: train_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
-    rconst.EVAL_USER_KEY: eval_df[movielens.USER_COLUMN].values.astype(rconst.USER_DTYPE),
-    rconst.EVAL_ITEM_KEY: eval_df[movielens.ITEM_COLUMN].values.astype(rconst.ITEM_DTYPE),
-    "user_map": user_map,
-    "item_map": item_map,
-    "create_time": time.time()
-  }
+    data = {
+        rconst.TRAIN_USER_KEY: train_df[movielens.USER_COLUMN]
+          .values.astype(rconst.USER_DTYPE),
+        rconst.TRAIN_ITEM_KEY: train_df[movielens.ITEM_COLUMN]
+          .values.astype(rconst.ITEM_DTYPE),
+        rconst.EVAL_USER_KEY: eval_df[movielens.USER_COLUMN]
+          .values.astype(rconst.USER_DTYPE),
+        rconst.EVAL_ITEM_KEY: eval_df[movielens.ITEM_COLUMN]
+          .values.astype(rconst.ITEM_DTYPE),
+        rconst.USER_MAP: user_map,
+        rconst.ITEM_MAP: item_map,
+        "create_time": time.time()
+    }
 
-  tf.logging.info("Writing raw data cache.")
-  with tf.gfile.Open(cache_path, "wb") as f:
-    pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tf.logging.info("Writing raw data cache.")
+    with tf.gfile.Open(cache_path, "wb") as f:
+      pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+  # TODO(robieta): MLPerf cache clear.
   return data
 
 
@@ -259,7 +265,6 @@ def instantiate_pipeline(dataset, data_dir, num_data_readers, match_mlperf,
       num_train_positives=raw_data[rconst.TRAIN_USER_KEY].shape[0],
       deterministic=deterministic)
 
-  # TODO(robieta): MLPerf cache clear.
   producer = data_pipeline.MaterializedDataConstructor(
       maximum_number_epochs=params["train_epochs"],
       num_users=num_users,
@@ -317,13 +322,11 @@ def make_input_fn(producer, is_training, use_tpu):
     return make_synthetic_input_fn(is_training=is_training)
 
   if is_training:
-    num_batches = producer.train_batches_per_epoch
     generator = producer.training_generator
     batch_size = producer.train_batch_size
     output_types = producer.train_gen_types
     output_shapes = producer.train_gen_shapes
   else:
-    num_batches = producer.eval_batches_per_epoch
     generator = producer.eval_generator
     batch_size = producer.eval_batch_size
     output_types = producer.eval_gen_types
@@ -345,7 +348,7 @@ def make_input_fn(producer, is_training, use_tpu):
 
     return dataset
 
-  return input_fn, num_batches
+  return input_fn
 
 
 # TODO(robieta): Some of this will be used for StreamingFilesDataset

@@ -150,12 +150,52 @@ def log_and_get_hooks(eval_batch_size):
   return benchmark_logger, train_hooks
 
 
+def parse_flags(flags_obj):
+  num_gpus = flags_core.get_num_gpus(flags_obj)
+
+  # TODO(robieta): TPU shards
+  num_devices = num_gpus or 1
+
+  batch_size = distribution_utils.per_device_batch_size(
+      (int(flags_obj.batch_size) + num_devices - 1) // num_devices, num_gpus)
+
+  eval_divisor = (rconst.NUM_EVAL_NEGATIVES + 1) * num_devices
+  eval_batch_size = int(flags_obj.eval_batch_size or flags_obj.batch_size or 1)
+  eval_batch_size = distribution_utils.per_device_batch_size(
+      (eval_batch_size + eval_divisor - 1) // eval_divisor, num_gpus)
+
+  return {
+    "train_epochs": flags_obj.train_epochs,
+    "batches_per_step": num_devices,
+    "use_seed": flags_obj.seed is not None,
+    "hash_pipeline": flags_obj.hash_pipeline,
+    "batch_size": batch_size,
+    "eval_batch_size": eval_batch_size,
+    "learning_rate": flags_obj.learning_rate,
+    "mf_dim": flags_obj.num_factors,
+    "model_layers": [int(layer) for layer in flags_obj.layers],
+    "mf_regularization": flags_obj.mf_regularization,
+    "mlp_reg_layers": [float(reg) for reg in flags_obj.mlp_regularization],
+    "num_neg": flags_obj.num_neg,
+    "num_gpus": num_gpus,
+    "use_tpu": flags_obj.tpu is not None,
+    "tpu": flags_obj.tpu,
+    "tpu_zone": flags_obj.tpu_zone,
+    "tpu_gcp_project": flags_obj.tpu_gcp_project,
+    "beta1": flags_obj.beta1,
+    "beta2": flags_obj.beta2,
+    "epsilon": flags_obj.epsilon,
+    "match_mlperf": flags_obj.ml_perf,
+    "use_xla_for_gpu": flags_obj.use_xla_for_gpu,
+    "use_estimator": flags_obj.use_estimator,
+  }
+
+
 def main(_):
   with logger.benchmark_context(FLAGS), \
        mlperf_helper.LOGGER(FLAGS.output_ml_perf_compliance_logging):
     mlperf_helper.set_ncf_root(os.path.split(os.path.abspath(__file__))[0])
     run_ncf(FLAGS)
-    mlperf_helper.stitch_ncf()
 
 
 def run_ncf(_):
@@ -166,55 +206,10 @@ def run_ncf(_):
   if FLAGS.seed is not None:
     np.random.seed(FLAGS.seed)
 
-  num_gpus = flags_core.get_num_gpus(FLAGS)
-
-  # TODO(robieta): TPU shards
-  num_devices = num_gpus or 1
-
-  batch_size = distribution_utils.per_device_batch_size(
-      int(FLAGS.batch_size), num_gpus)
+  params = parse_flags(FLAGS)
   total_training_cycle = FLAGS.train_epochs // FLAGS.epochs_between_evals
 
-  eval_per_user = rconst.NUM_EVAL_NEGATIVES + 1
-  eval_batch_size = int(FLAGS.eval_batch_size or
-                        max([FLAGS.batch_size, eval_per_user]))
-  if eval_batch_size % eval_per_user * num_devices:
-    eval_batch_size = (eval_batch_size // (eval_per_user * num_devices) *
-                       eval_per_user * num_devices)
-    device_warning = "" if num_devices == 1 else " times number of devices"
-    tf.logging.warning(
-        "eval examples per user{} does not evenly divide eval_batch_size. "
-        "Overriding to {}".format(device_warning, eval_batch_size))
-  eval_batch_size = distribution_utils.per_device_batch_size(
-      eval_batch_size, num_gpus)
-
-  params = {
-    "train_epochs": FLAGS.train_epochs,
-    "batches_per_step": num_gpus or 1,
-    "use_seed": FLAGS.seed is not None,
-    "hash_pipeline": FLAGS.hash_pipeline,
-    "batch_size": batch_size,
-    "eval_batch_size": eval_batch_size,
-    "learning_rate": FLAGS.learning_rate,
-    "mf_dim": FLAGS.num_factors,
-    "model_layers": [int(layer) for layer in FLAGS.layers],
-    "mf_regularization": FLAGS.mf_regularization,
-    "mlp_reg_layers": [float(reg) for reg in FLAGS.mlp_regularization],
-    "num_neg": FLAGS.num_neg,
-    "use_tpu": FLAGS.tpu is not None,
-    "tpu": FLAGS.tpu,
-    "tpu_zone": FLAGS.tpu_zone,
-    "tpu_gcp_project": FLAGS.tpu_gcp_project,
-    "beta1": FLAGS.beta1,
-    "beta2": FLAGS.beta2,
-    "epsilon": FLAGS.epsilon,
-    "match_mlperf": FLAGS.ml_perf,
-    "use_xla_for_gpu": FLAGS.use_xla_for_gpu,
-    "use_estimator": FLAGS.use_estimator,
-  }
-
   if FLAGS.use_synthetic_data:
-    ncf_dataset = None
     producer = data_pipeline.DummyConstructor()
     num_users, num_items = data_preprocessing.DATASET_TO_NUM_USERS_AND_ITEMS[
         FLAGS.dataset]
@@ -228,27 +223,21 @@ def run_ncf(_):
 
     num_users = ncf_dataset.num_users
     num_items = ncf_dataset.num_items
-    num_train_steps = int(np.ceil(
-        FLAGS.epochs_between_evals * ncf_dataset.num_train_positives *
-        (1 + FLAGS.num_neg) / FLAGS.batch_size))
-    num_eval_steps = int(np.ceil(
-        (1 + rconst.NUM_EVAL_NEGATIVES) *
-        ncf_dataset.num_users / eval_batch_size / num_devices))
+    num_train_steps = (producer.train_batches_per_epoch //
+                       params["batches_per_step"])
+    num_eval_steps = (producer.eval_batches_per_epoch //
+                      params["batches_per_step"])
+    assert not producer.train_batches_per_epoch % params["batches_per_step"]
+    assert not producer.eval_batches_per_epoch % params["batches_per_step"]
   producer.start()
 
   params["num_users"], params["num_items"] = num_users, num_items
   model_helpers.apply_clean(flags.FLAGS)
 
-  if FLAGS.use_estimator:
-    train_estimator, eval_estimator = construct_estimator(
-        num_gpus=num_gpus, model_dir=FLAGS.model_dir,
-        iterations=num_train_steps, params=params,
-        batch_size=flags.FLAGS.batch_size, eval_batch_size=eval_batch_size)
-  else:
-    raise NotImplementedError
-    # runner = model_runner.NcfModelRunner(ncf_dataset, params, num_train_steps,
-    #                                      num_eval_steps, FLAGS.use_while_loop)
-
+  train_estimator, eval_estimator = construct_estimator(
+      num_gpus=num_gpus, model_dir=FLAGS.model_dir,
+      iterations=num_train_steps, params=params,
+      batch_size=flags.FLAGS.batch_size, eval_batch_size=eval_batch_size)
 
   benchmark_logger, train_hooks = log_and_get_hooks(eval_batch_size)
 
@@ -262,45 +251,25 @@ def run_ncf(_):
     mlperf_helper.ncf_print(key=mlperf_helper.TAGS.TRAIN_EPOCH,
                             value=cycle_index)
 
-    # Train the model
-    if FLAGS.use_estimator:
-      train_input_fn, batch_count = data_preprocessing.make_input_fn(
-          producer=producer, is_training=True, use_tpu=params["use_tpu"])
+    train_input_fn = data_preprocessing.make_input_fn(
+        producer=producer, is_training=True, use_tpu=params["use_tpu"])
 
-      if batch_count != num_train_steps * params["batches_per_step"]:
-        raise ValueError(
-            "Step counts do not match. ({} vs. {}) The producer is "
-            "producing incorrect shards.".format(batch_count, num_train_steps))
+    train_estimator.train(input_fn=train_input_fn, hooks=train_hooks,
+                          steps=num_train_steps)
 
-      train_estimator.train(input_fn=train_input_fn, hooks=train_hooks,
-                            steps=num_train_steps)
+    tf.logging.info("Beginning evaluation.")
+    eval_input_fn = data_preprocessing.make_input_fn(
+        producer=producer, is_training=False, use_tpu=params["use_tpu"])
 
-      tf.logging.info("Beginning evaluation.")
-      eval_input_fn, eval_batch_count = data_preprocessing.make_input_fn(
-          producer=producer, is_training=False, use_tpu=params["use_tpu"])
-
-      if eval_batch_count != num_eval_steps * params["batches_per_step"]:
-        raise ValueError(
-            "Step counts do not match. ({} vs. {}) The async process is "
-            "producing incorrect shards.".format(
-                eval_batch_count, num_eval_steps))
-
-      mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
-                              value=cycle_index)
-      eval_results = eval_estimator.evaluate(eval_input_fn,
-                                             steps=num_eval_steps)
-      tf.logging.info("Evaluation complete.")
-    else:
-      raise NotImplementedError
-      # runner.train()
-      # tf.logging.info("Beginning evaluation.")
-      # mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
-      #                         value=cycle_index)
-      # eval_results = runner.eval()
-      # tf.logging.info("Evaluation complete.")
+    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_START,
+                            value=cycle_index)
+    eval_results = eval_estimator.evaluate(eval_input_fn,
+                                           steps=num_eval_steps)
+    tf.logging.info("Evaluation complete.")
 
     hr = float(eval_results[rconst.HR_KEY])
     ndcg = float(eval_results[rconst.NDCG_KEY])
+    loss = float(eval_results["loss"])
 
     mlperf_helper.ncf_print(
         key=mlperf_helper.TAGS.EVAL_TARGET,
@@ -311,18 +280,14 @@ def run_ncf(_):
         key=mlperf_helper.TAGS.EVAL_HP_NUM_NEG,
         value={"epoch": cycle_index, "value": rconst.NUM_EVAL_NEGATIVES})
 
-    # Logged by the async process during record creation.
-    mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_HP_NUM_USERS,
-                            deferred=True)
-
     mlperf_helper.ncf_print(key=mlperf_helper.TAGS.EVAL_STOP, value=cycle_index)
 
     # Benchmark the evaluation results
     benchmark_logger.log_evaluation_result(eval_results)
     # Log the HR and NDCG results.
     tf.logging.info(
-        "Iteration {}: HR = {:.4f}, NDCG = {:.4f}".format(
-            cycle_index + 1, hr, ndcg))
+        "Iteration {}: HR = {:.4f}, NDCG = {:.4f}, Loss = {:.4f}".format(
+            cycle_index + 1, hr, ndcg, loss))
 
     # If some evaluation threshold is met
     if model_helpers.past_stop_threshold(FLAGS.hr_threshold, hr):

@@ -278,7 +278,7 @@ class BaseDataConstructor(threading.Thread):
 
   def training_generator(self):
     for _ in range(self.train_batches_per_epoch):
-      yield self._training_queue.get()
+      yield self._training_queue.get(timeout=300)
 
   def eval_generator(self):
     while self._eval_results is None:

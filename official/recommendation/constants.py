@@ -30,6 +30,9 @@ MASK_START_INDEX = "mask_start_index"
 EVAL_USER_KEY = "eval_{}".format(movielens.USER_COLUMN)
 EVAL_ITEM_KEY = "eval_{}".format(movielens.ITEM_COLUMN)
 
+USER_MAP = "user_map"
+ITEM_MAP = "item_map"
+
 USER_DTYPE = np.int32
 ITEM_DTYPE = np.uint16
 LABEL_DTYPE = np.int8
