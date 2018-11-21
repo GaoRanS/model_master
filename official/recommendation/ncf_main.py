@@ -54,17 +54,13 @@ from official.utils.misc import model_helpers
 FLAGS = flags.FLAGS
 
 
-def construct_estimator(num_gpus, model_dir, iterations, params, batch_size,
-                        eval_batch_size):
+def construct_estimator(model_dir, iterations, params):
   """Construct either an Estimator or TPUEstimator for NCF.
 
   Args:
-    num_gpus: The number of gpus (Used to select distribution strategy)
     model_dir: The model directory for the estimator
     iterations:  Estimator iterations
     params: The params dict for the estimator
-    batch_size: The mini-batch size for training.
-    eval_batch_size: The batch size used during evaluation.
 
   Returns:
     An Estimator or TPUEstimator.
@@ -96,25 +92,24 @@ def construct_estimator(num_gpus, model_dir, iterations, params, batch_size,
     train_estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=neumf_model.neumf_model_fn,
         use_tpu=True,
-        train_batch_size=batch_size,
-        eval_batch_size=eval_batch_size,
+        train_batch_size=params["batch_size"] * params["num_devices"],
+        eval_batch_size=params["eval_batch_size"] * params["num_devices"],
         params=tpu_params,
         config=run_config)
 
     eval_estimator = tf.contrib.tpu.TPUEstimator(
         model_fn=neumf_model.neumf_model_fn,
         use_tpu=True,
-        train_batch_size=1,
-        eval_batch_size=eval_batch_size,
+        train_batch_size=params["batch_size"] * params["num_devices"],
+        eval_batch_size=params["eval_batch_size"] * params["num_devices"],
         params=tpu_params,
         config=run_config)
 
     return train_estimator, eval_estimator
 
-  distribution = distribution_utils.get_distribution_strategy(num_gpus=num_gpus)
+  distribution = distribution_utils.get_distribution_strategy(num_gpus=params["num_gpus"])
   run_config = tf.estimator.RunConfig(train_distribute=distribution,
                                       eval_distribute=distribution)
-  params["eval_batch_size"] = eval_batch_size
   model_fn = neumf_model.neumf_model_fn
   if params["use_xla_for_gpu"]:
     tf.logging.info("Using XLA for GPU for training and evaluation.")
@@ -156,12 +151,12 @@ def parse_flags(flags_obj):
   num_devices = num_gpus or 1
 
   batch_size = distribution_utils.per_device_batch_size(
-      (int(flags_obj.batch_size) + num_devices - 1) // num_devices, num_gpus)
+      (int(flags_obj.batch_size) + num_devices - 1) // num_devices * num_devices, num_gpus)
 
   eval_divisor = (rconst.NUM_EVAL_NEGATIVES + 1) * num_devices
   eval_batch_size = int(flags_obj.eval_batch_size or flags_obj.batch_size or 1)
   eval_batch_size = distribution_utils.per_device_batch_size(
-      (eval_batch_size + eval_divisor - 1) // eval_divisor, num_gpus)
+      (eval_batch_size + eval_divisor - 1) // eval_divisor * eval_divisor, num_gpus)
 
   return {
     "train_epochs": flags_obj.train_epochs,
@@ -186,7 +181,6 @@ def parse_flags(flags_obj):
     "epsilon": flags_obj.epsilon,
     "match_mlperf": flags_obj.ml_perf,
     "use_xla_for_gpu": flags_obj.use_xla_for_gpu,
-    "use_estimator": flags_obj.use_estimator,
   }
 
 
@@ -234,9 +228,7 @@ def run_ncf(_):
   model_helpers.apply_clean(flags.FLAGS)
 
   train_estimator, eval_estimator = construct_estimator(
-      num_gpus=num_gpus, model_dir=FLAGS.model_dir,
-      iterations=num_train_steps, params=params,
-      batch_size=flags.FLAGS.batch_size, eval_batch_size=eval_batch_size)
+      model_dir=FLAGS.model_dir, iterations=num_train_steps, params=params)
 
   benchmark_logger, train_hooks = log_and_get_hooks(eval_batch_size)
 
