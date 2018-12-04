@@ -239,17 +239,17 @@ def run_ncf(_):
   model_helpers.apply_clean(flags.FLAGS)
 
   if FLAGS.use_keras:
-    train_input_fn, _, _= data_preprocessing.make_input_fn(
-      ncf_dataset=ncf_dataset, is_training=True)
+    train_input_fn = data_preprocessing.make_input_fn(
+      producer=producer, is_training=True, use_tpu=params["use_tpu"])
 
     user_input = tf.keras.layers.Input(
       shape=(1,), batch_size=FLAGS.batch_size, name="user_id", dtype=tf.int32)
     item_input = tf.keras.layers.Input(
       shape=(1,), batch_size=FLAGS.batch_size, name="item_id", dtype=tf.int32)
 
-    base_model = neumf_model.construct_model(user_input, item_input, params)
-    keras_model = _logitfy([user_input, item_input], base_model) 
-    
+    base_model = neumf_model.construct_model_keras(user_input, item_input, params)
+    keras_model = _logitfy([user_input, item_input], base_model)
+
     keras_model.summary()
   else:
     train_estimator, eval_estimator = construct_estimator(
@@ -299,7 +299,7 @@ def run_ncf(_):
                 steps_per_epoch=steps_per_epoch,
                 callbacks=[],
                 verbose=0)
-    else: 
+    else:
       train_input_fn = data_preprocessing.make_input_fn(
           producer=producer, is_training=True, use_tpu=params["use_tpu"])
 
