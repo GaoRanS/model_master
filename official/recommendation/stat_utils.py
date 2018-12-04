@@ -18,71 +18,93 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from collections import deque
+import multiprocessing
+import sys
+import threading
+import time
+
 import numpy as np
+
 
 def random_int32():
   return np.random.randint(low=0, high=np.iinfo(np.int32).max, dtype=np.int32)
 
-def sample_with_exclusion(num_items, positive_set, n, replacement=True):
-  # type: (int, typing.Iterable, int, bool) -> list
-  """Vectorized negative sampling.
 
-  This function samples from the positive set's conjugate, both with and
-  without replacement.
+def _seeded_permutation(x, queue, count, count_lock, seed):
+  seed = seed or struct.unpack("<L", os.urandom(4))[0]
+  state = np.random.RandomState(seed=seed)
+  output = np.arange(x, dtype=np.int32)
+  state.shuffle(output)
+  queue.put(output)
+  with count_lock:
+    count.set(count.get() - 1)
 
-  Performance:
-    This algorithm generates a vector of candidate values based on the expected
-    number needed such that at least k are not in the positive set, where k
-    is the number of false negatives still needed. An additional factor of
-    safety of 1.2 is used during the generation to minimize the chance of having
-    to perform another generation cycle.
 
-    While this approach generates more values than needed and then discards some
-    of them, vectorized generation is inexpensive and turns out to be much
-    faster than generating points one at a time. (And it defers quite a bit
-    of work to NumPy which has much better multi-core utilization than native
-    Python.)
+class AsyncPermuter(threading.Thread):
+  def __init__(self, perm_size, num_workers=2, num_to_produce=None):
+    super(AsyncPermuter, self).__init__()
 
-  Args:
-    num_items: The cardinality of the entire set of items.
-    positive_set: The set of positive items which should not be included as
-      negatives.
-    n: The number of negatives to generate.
-    replacement: Whether to sample with (True) or without (False) replacement.
+    self._num_workers = num_workers
 
-  Returns:
-    A list of generated negatives.
-  """
+    self._num_to_produce = num_to_produce or np.inf
+    self._started_count = 0
+    self._max_queue_size = num_workers * 2
 
-  if not isinstance(positive_set, set):
-    positive_set = set(positive_set)
+    self._pool = multiprocessing.Pool(num_workers)
+    self._perm_size = perm_size
+    self._manager = multiprocessing.Manager()
+    self._result_queue = self._manager.Queue()
+    self._active_count = self._manager.Value("i", 0)
+    self._active_count_lock = self._manager.Lock()
+    self._stop_loop = False
 
-  p = 1 - len(positive_set) /  num_items
-  n_attempt = int(n * (1 / p) * 1.2)  # factor of 1.2 for safety
+  def _loop_cond(self):
+    with self._active_count_lock:
+      return (self._started_count < self._num_to_produce or
+              self._active_count.get()) and not self._stop_loop
 
-  # If sampling is performed with replacement, candidates are appended.
-  # Otherwise, they should be added with a set union to remove duplicates.
-  if replacement:
-    negatives = []
-  else:
-    negatives = set()
+  def run(self):
+    while self._loop_cond():
+      with self._active_count_lock:
+        current_count = self._active_count.get()
+        start_count = self._num_workers - current_count
+        if self._result_queue.qsize() + current_count >= self._max_queue_size:
+          start_count = 0
 
-  while len(negatives) < n:
-    negative_candidates = np.random.randint(
-        low=0, high=num_items, size=(n_attempt,))
-    if replacement:
-      negatives.extend(
-          [i for i in negative_candidates if i not in positive_set]
-      )
-    else:
-      negatives |= (set(negative_candidates) - positive_set)
+        self._active_count.set(self._active_count.get() + start_count)
 
-  if not replacement:
-    negatives = list(negatives)
-    np.random.shuffle(negatives)  # list(set(...)) is not order guaranteed, but
-    # in practice tends to be quite ordered.
+      for _ in range(start_count):
+        if self._started_count < self._num_to_produce:
+          self._started_count += 1
+          self._pool.apply_async(
+              func=_seeded_permutation,
+              args=(self._perm_size, self._result_queue, self._active_count,
+                    self._active_count_lock, random_int32()))
 
-  return negatives[:n]
+      time.sleep(0.01)
+
+    self._pool.close()
+    self._pool.terminate()
+    self.stop_loop()  # mark loop as closed.
+
+  def get(self):
+    if self._stop_loop and not self._result_queue.qsize():
+      raise ValueError("No entries in result queue and permuter is no longer "
+                       "producing entries.")
+    return self._result_queue.get()
+
+  def stop_loop(self):
+    self._stop_loop = True
+
+
+def very_slightly_biased_randint(max_val_vector):
+  sample_dtype = np.uint64
+  out_dtype = max_val_vector.dtype
+  samples = np.random.randint(low=0, high=np.iinfo(sample_dtype).max,
+                              size=max_val_vector.shape, dtype=sample_dtype)
+  return np.mod(samples, max_val_vector.astype(sample_dtype)).astype(out_dtype)
+
 
 def mask_duplicates(x, axis=1):  # type: (np.ndarray, int) -> np.ndarray
   """Identify duplicates from sampling with replacement.
