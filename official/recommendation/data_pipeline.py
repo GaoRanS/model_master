@@ -25,6 +25,7 @@ import struct
 import threading
 import time
 import timeit
+import contextlib
 
 import numpy as np
 from six.moves import queue
@@ -219,7 +220,7 @@ class BaseDataConstructor(threading.Thread):
     map_args = [i for i in range(self.train_batches_per_epoch)]
     assert not self._current_epoch_order.shape[0]
     self._current_epoch_order = self._shuffle_producer.get()
-    with multiprocessing.dummy.Pool(6) as pool:
+    with contextlib.closing(multiprocessing.dummy.Pool(6)) as pool:
       pool.map(self._get_training_batch, map_args)
 
     tf.logging.info("Epoch construction complete. Time: {:.1f} seconds".format(
@@ -269,7 +270,7 @@ class BaseDataConstructor(threading.Thread):
 
     start_time = timeit.default_timer()
     map_args = [i for i in range(self.eval_batches_per_epoch)]
-    with multiprocessing.dummy.Pool(6) as pool:
+    with contextlib.closing(multiprocessing.dummy.Pool(6)) as pool:
       eval_results = pool.map(self._get_eval_batch, map_args)
 
     self._eval_results = eval_results
