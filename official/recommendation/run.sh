@@ -6,7 +6,8 @@ if [ `id -u` != 0 ]; then
   sudo echo "Success"
 fi
 
-DATASET="ml-20m"
+# DATASET="ml-20m"
+DATASET="ml-1m"
 
 BUCKET=${BUCKET:-""}
 ROOT_DIR="${BUCKET:-/tmp}/MLPerf_NCF"
@@ -33,7 +34,7 @@ else
 fi
 
 DATA_DIR="${ROOT_DIR}/movielens_data"
-python ../datasets/movielens.py --data_dir ${DATA_DIR} --dataset ${DATASET}
+python3 ../datasets/movielens.py --data_dir ${DATA_DIR} --dataset ${DATASET}
 
 {
 
@@ -59,10 +60,10 @@ do
   #   --hash_pipeline
   #
   # (`--hash_pipeline` will slow down training, though not as much as one might imagine.)
-  python ncf_main.py --model_dir ${MODEL_DIR} \
+  python3 ncf_main.py --model_dir ${MODEL_DIR} \
                      --data_dir ${DATA_DIR} \
                      --dataset ${DATASET} --hooks "" \
-                     ${DEVICE_FLAG} \
+                     --num_gpus 1 \
                      --clean \
                      --train_epochs 14 \
                      --batch_size 98304 \

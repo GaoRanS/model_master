@@ -238,9 +238,12 @@ def run_ncf(_):
   params["num_users"], params["num_items"] = num_users, num_items
   model_helpers.apply_clean(flags.FLAGS)
 
+  print(">>>>>>>>>>>>> zhenzheng use_keras: ", FLAGS.use_keras)
+  print(">>>>>>>>>>>>> zhenzheng num_gpus: ", params["num_gpus"])
+
   if FLAGS.use_keras:
     train_input_fn = data_preprocessing.make_input_fn(
-      producer=producer, is_training=True, use_tpu=params["use_tpu"])
+      producer=producer, is_training=True, use_tpu=False)
 
     user_input = tf.keras.layers.Input(
       shape=(1,), batch_size=FLAGS.batch_size, name="user_id", dtype=tf.int32)
@@ -276,13 +279,18 @@ def run_ncf(_):
           y_true: True labels. Tensor of shape [batch_size,]
           y_pred: Predictions. Tensor of shape [batch_size, num_classes]
         """
+
+        print(">>>>>> zhenzheng, true: ", y_true.shape)
+        print(">>>>>> zhenzheng, pred: ", y_pred.shape)
+
         y_true = tf.cast(y_true, tf.int32)
         return tf.losses.sparse_softmax_cross_entropy(
-          labels=tf.reshape(y_true, [FLAGS.batch_size,]),
-          logits=tf.reshape(y_pred, [FLAGS.batch_size, 2]))
+          labels=tf.reshape(y_true, [FLAGS.batch_size,], name="zz_loss_labels"),
+          # logits=tf.reshape(y_pred, [FLAGS.batch_size, 2], name="zz_loss_logits"))
+          logits=y_pred)
 
       opt = neumf_model.get_optimizer(params)
-      strategy = distribution_utils.get_distribution_strategy(num_gpus=1)
+      distribution = distribution_utils.get_distribution_strategy(num_gpus=params["num_gpus"])
 
       keras_model.compile(loss=softmax_crossentropy_with_logits,
                     optimizer=opt,
@@ -293,6 +301,10 @@ def run_ncf(_):
       steps_per_epoch = total_examples // FLAGS.batch_size
 
       train_input_dataset = train_input_fn(params)
+
+
+      model_save_path = '/tmp/MLPerf_NCF/models/my_model'
+      keras_model.save(model_save_path)
 
       keras_model.fit(train_input_dataset,
                 epochs=FLAGS.train_epochs,
@@ -516,7 +528,7 @@ def define_ncf_flags():
           "GPU. On TPUs, XLA is always used"))
 
   flags.DEFINE_bool(
-      name="use_keras", default=None, help=flags_core.help_wrap(
+      name="use_keras", default=True, help=flags_core.help_wrap(
         "Use keras instead of estimator"))
 
   xla_message = "--use_xla_for_gpu is incompatible with --tpu"
