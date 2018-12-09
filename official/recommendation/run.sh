@@ -64,7 +64,7 @@ do
                      --dataset ${DATASET} --hooks "" \
                      --num_gpus 1 \
                      --clean \
-                     --train_epochs 14 \
+                     --train_epochs 3 \
                      --batch_size 98304 \
                      --eval_batch_size 160000 \
                      --learning_rate 0.00382059 \

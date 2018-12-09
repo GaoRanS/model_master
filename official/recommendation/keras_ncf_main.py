@@ -113,7 +113,7 @@ def run_ncf(_):
 
 
   train_input_fn = data_preprocessing.make_input_fn(
-    producer=producer, is_training=True, use_tpu=params["use_tpu"])
+    producer=producer, is_training=True, use_tpu=False)
 
   user_input = tf.keras.layers.Input(
     shape=(1,), batch_size=FLAGS.batch_size, name="user_id", dtype=tf.int32)
@@ -146,15 +146,16 @@ def run_ncf(_):
                 metrics=['accuracy'],
                 distribute=None)
 
-  total_examples = 1000210
-  steps_per_epoch = total_examples // FLAGS.batch_size
+  num_train_steps = (producer.train_batches_per_epoch //
+                     params["batches_per_step"])
 
-  train_input_dataset = train_input_fn(params)
+  print(">>>>>>>>>>> zhenzheng epochs: ", FLAGS.train_epochs)
+  train_input_dataset = train_input_fn(params).repeat(FLAGS.train_epochs)
 
   print(">>>>>>>>>>> zhenzheng before fit")
   keras_model.fit(train_input_dataset,
             epochs=FLAGS.train_epochs,
-            steps_per_epoch=steps_per_epoch,
+            steps_per_epoch=num_train_steps,
             callbacks=[],
             verbose=0)
   print(">>>>>>>>>>> zhenzheng done fit")
