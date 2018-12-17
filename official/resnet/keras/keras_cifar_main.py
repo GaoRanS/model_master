@@ -31,6 +31,7 @@ from official.resnet.keras import keras_resnet_model
 from official.utils.flags import core as flags_core
 from official.utils.logs import logger
 from official.utils.misc import distribution_utils
+from tensorflow.python.client import timeline
 from tensorflow.python.keras.optimizer_v2 import gradient_descent as gradient_descent_v2
 
 
@@ -266,6 +267,10 @@ def run_cifar_with_keras(flags_obj):
   loss = 'categorical_crossentropy'
   accuracy = 'categorical_accuracy'
 
+
+  run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+  run_metadata = tf.RunMetadata()
+
   if flags_obj.num_gpus == 1 and flags_obj.dist_strat_off:
     print('Not using distribution strategies.')
     model.compile(loss=loss,
@@ -275,7 +280,8 @@ def run_cifar_with_keras(flags_obj):
     model.compile(loss=loss,
                   optimizer=opt,
                   metrics=[accuracy],
-                  distribute=strategy)
+                  distribute=strategy,
+                  run_metadata=run_metadata)
 
   steps_per_epoch = cifar_main._NUM_IMAGES['train'] // flags_obj.batch_size
 
@@ -305,6 +311,10 @@ def run_cifar_with_keras(flags_obj):
                       validation_steps=num_eval_steps,
                       validation_data=eval_input_dataset,
                       verbose=1)
+
+  trace = timeline.Timeline(step_stats=run_metadata.step_stats)
+  with open('/tmp/logs/cifar_timeline', 'w') as f:
+    f.write(trace.generate_chrome_trace_format())
 
   eval_output = model.evaluate(eval_input_dataset,
                                steps=num_eval_steps,

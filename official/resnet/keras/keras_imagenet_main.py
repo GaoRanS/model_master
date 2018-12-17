@@ -172,7 +172,7 @@ def run_imagenet_with_keras(flags_obj):
   """
   if flags_obj.enable_eager:
     tf.enable_eager_execution()
-  
+
   dtype = flags_core.get_tf_dtype(flags_obj)
   if dtype == 'fp16':
     raise ValueError('dtype fp16 is not supported in Keras. Use the default '
@@ -188,6 +188,8 @@ def run_imagenet_with_keras(flags_obj):
         imagenet_main._NUM_CHANNELS, imagenet_main._NUM_CLASSES,
         dtype=flags_core.get_tf_dtype(flags_obj))
     train_input_dataset = synth_input_fn(
+        is_training=True,
+        data_dir=None,
         batch_size=per_device_batch_size,
         height=imagenet_main._DEFAULT_IMAGE_SIZE,
         width=imagenet_main._DEFAULT_IMAGE_SIZE,
@@ -195,6 +197,8 @@ def run_imagenet_with_keras(flags_obj):
         num_classes=imagenet_main._NUM_CLASSES,
         dtype=dtype)
     eval_input_dataset = synth_input_fn(
+        is_training=False,
+        data_dir=None,
         batch_size=per_device_batch_size,
         height=imagenet_main._DEFAULT_IMAGE_SIZE,
         width=imagenet_main._DEFAULT_IMAGE_SIZE,
@@ -231,7 +235,7 @@ def run_imagenet_with_keras(flags_obj):
   # learning_rate = BASE_LEARNING_RATE * flags_obj.batch_size / 256
   # opt = tf.train.MomentumOptimizer(learning_rate=learning_rate, momentum=0.9)
 
-  
+
   strategy = distribution_utils.get_distribution_strategy(
       num_gpus=flags_obj.num_gpus)
 
@@ -240,10 +244,14 @@ def run_imagenet_with_keras(flags_obj):
   else:
     model = keras_resnet_model.ResNet50(classes=imagenet_main._NUM_CLASSES,
                                         weights=None)
-    
+
+  print(">>>>>>>>>>>>>>> Model input: ", model.input)
+  print(">>>>>>>>>>>>>>> Model output: ", model.output)
+  print(">>>>>>>>>>>>>>> data: ", train_input_dataset.output)
+
   loss = 'sparse_categorical_crossentropy'
   accuracy = 'sparse_categorical_accuracy'
- 
+
   model.compile(loss=loss,
                 optimizer=opt,
                 metrics=[accuracy],
@@ -261,10 +269,10 @@ def run_imagenet_with_keras(flags_obj):
     learning_rate_schedule,
     batch_size=flags_obj.batch_size,
     num_images=imagenet_main._NUM_IMAGES['train'])
-    
+
   num_eval_steps = (imagenet_main._NUM_IMAGES['validation'] //
                   flags_obj.batch_size)
-  
+
   model.fit(train_input_dataset,
             epochs=flags_obj.train_epochs,
             steps_per_epoch=steps_per_epoch,
@@ -276,7 +284,7 @@ def run_imagenet_with_keras(flags_obj):
             validation_steps=num_eval_steps,
             validation_data=eval_input_dataset,
             verbose=1)
-  
+
   eval_output = model.evaluate(eval_input_dataset,
                                steps=num_eval_steps,
                                verbose=1)
@@ -284,8 +292,8 @@ def run_imagenet_with_keras(flags_obj):
 
 def define_keras_imagenet_flags():
   flags.DEFINE_boolean(name='enable_eager', default=False, help='Enable eager?')
-    
-  
+
+
 def main(_):
   with logger.benchmark_context(flags.FLAGS):
     run_imagenet_with_keras(flags.FLAGS)
