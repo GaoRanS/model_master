@@ -139,7 +139,8 @@ def run(flags_obj):
       parse_record_fn=parse_record_keras)
 
   strategy = distribution_utils.get_distribution_strategy(
-      flags_obj.num_gpus, flags_obj.turn_off_distribution_strategy)
+      flags_obj.num_gpus,
+      turn_off_distribution_strategy=flags_obj.turn_off_distribution_strategy)
 
   strategy_scope = keras_common.get_strategy_scope(strategy)
 
@@ -192,7 +193,9 @@ def run(flags_obj):
 
 def main(_):
   with logger.benchmark_context(flags.FLAGS):
-    return run(flags.FLAGS)
+    res = run(flags.FLAGS)
+    print('\nRESULT:', res)
+    return res
 
 
 if __name__ == '__main__':
