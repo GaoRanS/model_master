@@ -194,9 +194,22 @@ def instantiate_pipeline(dataset, data_dir, params, constructor_type=None,
   raw_rating_path = os.path.join(data_dir, dataset, movielens.RATINGS_FILE)
   cache_path = os.path.join(data_dir, dataset, rconst.RAW_CACHE_FILE)
 
-  raw_data, _ = _filter_index_sort(raw_rating_path, cache_path)
-  user_map, item_map = raw_data["user_map"], raw_data["item_map"]
-  num_users, num_items = DATASET_TO_NUM_USERS_AND_ITEMS[dataset]
+  if params["custom_cache_file"]:
+    if params["use_permutation"]:
+      raise ValueError(
+          "You should consider setting --use_permutation=False. "
+          "(Or comment out this warning if you really want a full shuffle.)")
+
+    with tf.gfile.Open(params["custom_cache_file"], "rb") as f:
+      raw_data = pickle.load(f)
+    user_map, item_map = raw_data["user_map"], raw_data["item_map"]
+    num_users = len(user_map)
+    num_items = len(item_map)
+
+  else:
+    raw_data, _ = _filter_index_sort(raw_rating_path, cache_path)
+    user_map, item_map = raw_data["user_map"], raw_data["item_map"]
+    num_users, num_items = DATASET_TO_NUM_USERS_AND_ITEMS[dataset]
 
   if num_users != len(user_map):
     raise ValueError("Expected to find {} users, but found {}".format(
@@ -221,7 +234,8 @@ def instantiate_pipeline(dataset, data_dir, params, constructor_type=None,
       eval_batch_size=params["eval_batch_size"],
       batches_per_eval_step=params["batches_per_step"],
       stream_files=params["use_tpu"],
-      deterministic=deterministic
+      deterministic=deterministic,
+      use_permutation=params["use_permutation"]
   )
 
   run_time = timeit.default_timer() - st

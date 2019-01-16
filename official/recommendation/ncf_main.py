@@ -174,6 +174,8 @@ def parse_flags(flags_obj):
       "match_mlperf": flags_obj.ml_perf,
       "use_xla_for_gpu": flags_obj.use_xla_for_gpu,
       "epochs_between_evals": FLAGS.epochs_between_evals,
+      "use_permutation": FLAGS.use_permutation,
+      "custom_cache_file": FLAGS.custom_cache_file,
   }
 
 
@@ -436,6 +438,19 @@ def define_ncf_flags():
   @flags.multi_flags_validator(["use_xla_for_gpu", "tpu"], message=xla_message)
   def xla_validator(flag_dict):
     return not flag_dict["use_xla_for_gpu"] or not flag_dict["tpu"]
+
+  flags.DEFINE_bool(
+      name="use_permutation", default=True, help=flags_core.help_wrap(
+          "Whether to shuffle the dataset, or just randomly select enough "
+          "points. Skipping the permutation is a quick-and-dirty way to bypass "
+          "generating large permutations. "
+          "(Short term hack; not MLPerf compliant.)"))
+
+  flags.DEFINE_string(
+      name="custom_cache_file", default=None, help=flags_core.help_wrap(
+          "The path to a custom cache file. If present data will be taken from "
+          "this file rather than generating a cache file from the dataset "
+          "specification."))
 
 
 if __name__ == "__main__":

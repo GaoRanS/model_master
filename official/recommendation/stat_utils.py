@@ -50,6 +50,14 @@ def permutation(args):
   return output
 
 
+def randint_selection(args):
+  x, seed = args
+
+  # If seed is None NumPy will seed randomly.
+  state = np.random.RandomState(seed=seed)  # pylint: disable=no-member
+  return state.randint(low=0, high=x, size=(x,), dtype=np.int64)
+
+
 def very_slightly_biased_randint(max_val_vector):
   sample_dtype = np.uint64
   out_dtype = max_val_vector.dtype
