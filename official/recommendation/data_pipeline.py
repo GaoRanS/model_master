@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import atexit
 import functools
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -309,6 +310,28 @@ class DatasetManager(object):
     return input_fn
 
 
+_WORKER_CACHE = {}
+def worker_init_fn(lookup_variables):
+  # type: (dict) -> None
+  try:
+    for key, value in lookup_variables.items():
+      if isinstance(value, tuple):
+        assert len(value) == 2
+        value = np.frombuffer(value[0], dtype=value[1])
+
+      _WORKER_CACHE[key] = value
+  except Exception as e:
+    traceback.print_exc()
+    sys.stderr.flush()
+    raise
+
+
+def to_sharable(x):
+  # type: (np.ndarray) -> tuple
+  assert isinstance(x, np.ndarray)
+  return multiprocessing.RawArray("b", memoryview(x).tobytes()), x.dtype
+
+
 class BaseDataConstructor(threading.Thread):
   """Data constructor base class.
 
@@ -401,6 +424,28 @@ class BaseDataConstructor(threading.Thread):
     self._fatal_exception = None
     self.deterministic = deterministic
 
+    # Share constants with workers.
+    self._lookup_variables = {
+      "num_users": self._num_users,
+      "num_items": self._num_items,
+      "train_pos_count": self._train_pos_count,
+      "train_batch_size": self.train_batch_size,
+      "train_pos_users": to_sharable(self._train_pos_users),
+      "train_pos_items": to_sharable(self._train_pos_items),
+      "eval_users_per_batch": self._eval_users_per_batch,
+      "eval_pos_users": self._eval_pos_users,
+      "eval_pos_items": self._eval_pos_items,
+    }
+    self.initialize_lookup_variables()
+    self.construct_lookup_variables()
+
+    self._master_pool_worker_count = 6
+    self._master_pool = popen_helper.get_forkpool(
+      6, init_worker=worker_init_fn, initargs=(self._lookup_variables,),
+      closing=False)
+    atexit.register(self._master_pool.terminate)
+    atexit.register(self._master_pool.join)
+
   def __str__(self):
     multiplier = ("(x{} devices)".format(self._batches_per_train_step)
                   if self._batches_per_train_step > 1 else "")
@@ -422,6 +467,10 @@ class BaseDataConstructor(threading.Thread):
   def stop_loop(self):
     self._stop_loop = True
 
+  def initialize_lookup_variables(self):
+    self._lookup_variables["current_epoch_order"] = to_sharable(
+      np.zeros(shape=self._elements_in_epoch, dtype=np.int64))
+
   def construct_lookup_variables(self):
     """Perform any one time pre-compute work."""
     raise NotImplementedError
@@ -433,7 +482,6 @@ class BaseDataConstructor(threading.Thread):
   def _run(self):
     atexit.register(self.stop_loop)
     self._start_shuffle_iterator()
-    self.construct_lookup_variables()
     self._construct_training_epoch()
     self._construct_eval_epoch()
     for _ in range(self._maximum_number_epochs - 1):
@@ -448,6 +496,7 @@ class BaseDataConstructor(threading.Thread):
       # necessary to catch and re-raise to get debug output
       traceback.print_exc()
       self._fatal_exception = e
+      sys.stdout.flush()
       sys.stderr.flush()
       raise
 
@@ -465,49 +514,56 @@ class BaseDataConstructor(threading.Thread):
               stat_utils.randint_selection)
     self._shuffle_iterator = imap(map_fn, args)
 
-  def _get_training_batch(self, i):
+  @staticmethod
+  def _get_training_batch(args):
     """Construct a single batch of training data.
-
-    Args:
-      i: The index of the batch. This is used when stream_files=True to assign
-        data to file shards.
     """
-    batch_indices = self._current_epoch_order[i * self.train_batch_size:
-                                              (i + 1) * self.train_batch_size]
+    i, lookup_negative_items = args
+
+    train_batch_size = _WORKER_CACHE["train_batch_size"]
+    _current_epoch_order = _WORKER_CACHE["current_epoch_order"]
+    _train_pos_count = _WORKER_CACHE["train_pos_count"]
+    _train_pos_users = _WORKER_CACHE["train_pos_users"]
+    _train_pos_items = _WORKER_CACHE["train_pos_items"]
+    _num_users = _WORKER_CACHE["num_users"]
+    _num_items = _WORKER_CACHE["num_items"]
+
+    batch_indices = _current_epoch_order[i * train_batch_size:
+                                         (i + 1) * train_batch_size]
     (mask_start_index,) = batch_indices.shape
 
-    batch_ind_mod = np.mod(batch_indices, self._train_pos_count)
-    users = self._train_pos_users[batch_ind_mod]
+    batch_ind_mod = np.mod(batch_indices, _train_pos_count)
+    users = _train_pos_users[batch_ind_mod]
 
-    negative_indices = np.greater_equal(batch_indices, self._train_pos_count)
+    negative_indices = np.greater_equal(batch_indices, _train_pos_count)
     negative_users = users[negative_indices]
 
-    negative_items = self.lookup_negative_items(negative_users=negative_users)
+    negative_items = lookup_negative_items(negative_users=negative_users)
 
-    items = self._train_pos_items[batch_ind_mod]
+    items = _train_pos_items[batch_ind_mod]
     items[negative_indices] = negative_items
 
     labels = np.logical_not(negative_indices)
 
     # Pad last partial batch
-    pad_length = self.train_batch_size - mask_start_index
+    pad_length = train_batch_size - mask_start_index
     if pad_length:
       # We pad with arange rather than zeros because the network will still
       # compute logits for padded examples, and padding with zeros would create
       # a very "hot" embedding key which can have performance implications.
-      user_pad = np.arange(pad_length, dtype=users.dtype) % self._num_users
-      item_pad = np.arange(pad_length, dtype=items.dtype) % self._num_items
+      user_pad = np.arange(pad_length, dtype=users.dtype) % _num_users
+      item_pad = np.arange(pad_length, dtype=items.dtype) % _num_items
       label_pad = np.zeros(shape=(pad_length,), dtype=labels.dtype)
       users = np.concatenate([users, user_pad])
       items = np.concatenate([items, item_pad])
       labels = np.concatenate([labels, label_pad])
 
-    self._train_dataset.put(i, {
-        movielens.USER_COLUMN: users,
-        movielens.ITEM_COLUMN: items,
-        rconst.MASK_START_INDEX: np.array(mask_start_index, dtype=np.int32),
-        "labels": labels,
-    })
+    return i, {
+      movielens.USER_COLUMN: users,
+      movielens.ITEM_COLUMN: items,
+      rconst.MASK_START_INDEX: np.array(mask_start_index, dtype=np.int32),
+      "labels": labels,
+    }
 
   def _wait_to_construct_train_epoch(self):
     count = 0
@@ -526,13 +582,16 @@ class BaseDataConstructor(threading.Thread):
       return
 
     self._train_dataset.start_construction()
-    map_args = list(range(self.train_batches_per_epoch))
+    map_args = [(i, self.lookup_negative_items) for i
+                in range(self.train_batches_per_epoch)]
+
     self._current_epoch_order = next(self._shuffle_iterator)
 
-    get_pool = (popen_helper.get_fauxpool if self.deterministic else
-                popen_helper.get_threadpool)
-    with get_pool(6) as pool:
-      pool.map(self._get_training_batch, map_args)
+    assert self._current_epoch_order.dtype == self._lookup_variables["current_epoch_order"][1]
+    self._lookup_variables["current_epoch_order"][0][:] = memoryview(self._current_epoch_order).tobytes()
+
+    for batch in self._master_pool.imap(self._get_training_batch, map_args):
+      self._train_dataset.put(*batch)
     self._train_dataset.end_construction()
 
     tf.logging.info("Epoch construction complete. Time: {:.1f} seconds".format(
@@ -578,28 +637,35 @@ class BaseDataConstructor(threading.Thread):
     assert users.shape == items.shape == duplicate_mask.shape
     return users, items, duplicate_mask
 
-  def _get_eval_batch(self, i):
+  @staticmethod
+  def _get_eval_batch(args):
     """Construct a single batch of evaluation data.
 
     Args:
       i: The index of the batch.
     """
-    low_index = i * self._eval_users_per_batch
-    high_index = (i + 1) * self._eval_users_per_batch
-    users = np.repeat(self._eval_pos_users[low_index:high_index, np.newaxis],
+    i, lookup_negative_items, _assemble_eval_batch = args
+
+    _eval_users_per_batch = _WORKER_CACHE["eval_users_per_batch"]
+    _eval_pos_users = _WORKER_CACHE["eval_pos_users"]
+    _eval_pos_items = _WORKER_CACHE["eval_pos_items"]
+
+    low_index = i * _eval_users_per_batch
+    high_index = (i + 1) * _eval_users_per_batch
+    users = np.repeat(_eval_pos_users[low_index:high_index, np.newaxis],
                       1 + rconst.NUM_EVAL_NEGATIVES, axis=1)
-    positive_items = self._eval_pos_items[low_index:high_index, np.newaxis]
-    negative_items = (self.lookup_negative_items(negative_users=users[:, :-1])
+    positive_items = _eval_pos_items[low_index:high_index, np.newaxis]
+    negative_items = (lookup_negative_items(negative_users=users[:, :-1])
                       .reshape(-1, rconst.NUM_EVAL_NEGATIVES))
 
-    users, items, duplicate_mask = self._assemble_eval_batch(
-        users, positive_items, negative_items, self._eval_users_per_batch)
+    users, items, duplicate_mask = _assemble_eval_batch(
+        users, positive_items, negative_items, _eval_users_per_batch)
 
-    self._eval_dataset.put(i, {
-        movielens.USER_COLUMN: users.flatten(),
-        movielens.ITEM_COLUMN: items.flatten(),
-        rconst.DUPLICATE_MASK: duplicate_mask.flatten(),
-    })
+    return i, {
+      movielens.USER_COLUMN: users.flatten(),
+      movielens.ITEM_COLUMN: items.flatten(),
+      rconst.DUPLICATE_MASK: duplicate_mask.flatten(),
+    }
 
   def _construct_eval_epoch(self):
     """Loop to construct data for evaluation."""
@@ -609,12 +675,12 @@ class BaseDataConstructor(threading.Thread):
     start_time = timeit.default_timer()
 
     self._eval_dataset.start_construction()
-    map_args = [i for i in range(self.eval_batches_per_epoch)]
+    map_args = [(i, self.lookup_negative_items, self._assemble_eval_batch)
+                for i in range(self.eval_batches_per_epoch)]
 
-    get_pool = (popen_helper.get_fauxpool if self.deterministic else
-                popen_helper.get_threadpool)
-    with get_pool(6) as pool:
-      pool.map(self._get_eval_batch, map_args)
+    for batch in self._master_pool.imap(self._get_eval_batch, map_args):
+      self._eval_dataset.put(*batch)
+
     self._eval_dataset.end_construction()
 
     tf.logging.info("Eval construction complete. Time: {:.1f} seconds".format(
@@ -684,78 +750,11 @@ class DummyConstructor(threading.Thread):
 
 
 class MaterializedDataConstructor(BaseDataConstructor):
-  """Materialize a table of negative examples for fast negative generation.
-
-  This class creates a table (num_users x num_items) containing all of the
-  negative examples for each user. This table is conceptually ragged; that is to
-  say the items dimension will have a number of unused elements at the end equal
-  to the number of positive elements for a given user. For instance:
-
-  num_users = 3
-  num_items = 5
-  positives = [[1, 3], [0], [1, 2, 3, 4]]
-
-  will generate a negative table:
-  [
-    [0         2         4         int32max  int32max],
-    [1         2         3         4         int32max],
-    [0         int32max  int32max  int32max  int32max],
-  ]
-
-  and a vector of per-user negative counts, which in this case would be:
-    [3, 4, 1]
-
-  When sampling negatives, integers are (nearly) uniformly selected from the
-  range [0, per_user_neg_count[user]) which gives a column_index, at which
-  point the negative can be selected as:
-    negative_table[user, column_index]
-
-  This technique will not scale; however MovieLens is small enough that even
-  a pre-compute which is quadratic in problem size will still fit in memory. A
-  more scalable lookup method is in the works.
-  """
   def __init__(self, *args, **kwargs):
     super(MaterializedDataConstructor, self).__init__(*args, **kwargs)
-    self._negative_table = None
-    self._per_user_neg_count = None
+    raise NotImplementedError
 
-  def construct_lookup_variables(self):
-    # Materialize negatives for fast lookup sampling.
-    start_time = timeit.default_timer()
-    inner_bounds = np.argwhere(self._train_pos_users[1:] -
-                               self._train_pos_users[:-1])[:, 0] + 1
-    (upper_bound,) = self._train_pos_users.shape
-    index_bounds = [0] + inner_bounds.tolist() + [upper_bound]
-    self._negative_table = np.zeros(shape=(self._num_users, self._num_items),
-                                    dtype=rconst.ITEM_DTYPE)
 
-    # Set the table to the max value to make sure the embedding lookup will fail
-    # if we go out of bounds, rather than just overloading item zero.
-    self._negative_table += np.iinfo(rconst.ITEM_DTYPE).max
-    assert self._num_items < np.iinfo(rconst.ITEM_DTYPE).max
-
-    # Reuse arange during generation. np.delete will make a copy.
-    full_set = np.arange(self._num_items, dtype=rconst.ITEM_DTYPE)
-
-    self._per_user_neg_count = np.zeros(
-        shape=(self._num_users,), dtype=np.int32)
-
-    # Threading does not improve this loop. For some reason, the np.delete
-    # call does not parallelize well. Multiprocessing incurs too much
-    # serialization overhead to be worthwhile.
-    for i in range(self._num_users):
-      positives = self._train_pos_items[index_bounds[i]:index_bounds[i+1]]
-      negatives = np.delete(full_set, positives)
-      self._per_user_neg_count[i] = self._num_items - positives.shape[0]
-      self._negative_table[i, :self._per_user_neg_count[i]] = negatives
-
-    tf.logging.info("Negative sample table built. Time: {:.1f} seconds".format(
-        timeit.default_timer() - start_time))
-
-  def lookup_negative_items(self, negative_users, **kwargs):
-    negative_item_choice = stat_utils.very_slightly_biased_randint(
-        self._per_user_neg_count[negative_users])
-    return self._negative_table[negative_users, negative_item_choice]
 
 
 class BisectionDataConstructor(BaseDataConstructor):
@@ -802,17 +801,28 @@ class BisectionDataConstructor(BaseDataConstructor):
     self._total_negatives = np.concatenate([
         self._index_segment(i) for i in range(self._num_users)])
 
+    # Share constants with workers.
+    self._lookup_variables["index_bounds"] = to_sharable(self.index_bounds)
+    self._lookup_variables["total_negatives"] = to_sharable(self._total_negatives)
+    self._lookup_variables["sorted_train_pos_items"] = to_sharable(self._sorted_train_pos_items)
+
     tf.logging.info("Negative total vector built. Time: {:.1f} seconds".format(
         timeit.default_timer() - start_time))
 
-  def lookup_negative_items(self, negative_users, **kwargs):
+  @staticmethod
+  def lookup_negative_items(negative_users, **kwargs):
+    _index_bounds = _WORKER_CACHE["index_bounds"]
+    _total_negatives = _WORKER_CACHE["total_negatives"]
+    _sorted_train_pos_items = _WORKER_CACHE["sorted_train_pos_items"]
+    _num_items = _WORKER_CACHE["num_items"]
+
     output = np.zeros(shape=negative_users.shape, dtype=rconst.ITEM_DTYPE) - 1
 
-    left_index = self.index_bounds[negative_users]
-    right_index = self.index_bounds[negative_users + 1] - 1
+    left_index = _index_bounds[negative_users]
+    right_index = _index_bounds[negative_users + 1] - 1
 
     num_positives = right_index - left_index + 1
-    num_negatives = self._num_items - num_positives
+    num_negatives = _num_items - num_positives
     neg_item_choice = stat_utils.very_slightly_biased_randint(num_negatives)
 
     # Shortcuts:
@@ -828,10 +838,10 @@ class BisectionDataConstructor(BaseDataConstructor):
     # efficient, allowing ~60% of samples to bypass the bisection. For the same
     # reason, the second shortcut is rarely triggered (<0.02%) and is therefore
     # not worth implementing.
-    use_shortcut = neg_item_choice >= self._total_negatives[right_index]
+    use_shortcut = neg_item_choice >= _total_negatives[right_index]
     output[use_shortcut] = (
-        self._sorted_train_pos_items[right_index] + 1 +
-        (neg_item_choice - self._total_negatives[right_index])
+        _sorted_train_pos_items[right_index] + 1 +
+        (neg_item_choice - _total_negatives[right_index])
     )[use_shortcut]
 
     if np.all(use_shortcut):
@@ -848,7 +858,7 @@ class BisectionDataConstructor(BaseDataConstructor):
 
     for i in range(num_loops):
       mid_index = (left_index + right_index) // 2
-      right_criteria = self._total_negatives[mid_index] > neg_item_choice
+      right_criteria = _total_negatives[mid_index] > neg_item_choice
       left_criteria = np.logical_not(right_criteria)
 
       right_index[right_criteria] = mid_index[right_criteria]
@@ -861,8 +871,8 @@ class BisectionDataConstructor(BaseDataConstructor):
     assert np.all((right_index - left_index) <= 1)
 
     output[not_use_shortcut] = (
-        self._sorted_train_pos_items[right_index] -
-        (self._total_negatives[right_index] - neg_item_choice)
+        _sorted_train_pos_items[right_index] -
+        (_total_negatives[right_index] - neg_item_choice)
     )
 
     assert np.all(output >= 0)

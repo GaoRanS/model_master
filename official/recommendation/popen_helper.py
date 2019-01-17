@@ -19,14 +19,15 @@ import multiprocessing
 import multiprocessing.pool
 
 
-def get_forkpool(num_workers, init_worker=None, closing=True):
-  pool = multiprocessing.Pool(processes=num_workers, initializer=init_worker)
+def get_forkpool(num_workers, init_worker=None, initargs=None, closing=True):
+  pool = multiprocessing.Pool(
+      processes=num_workers, initializer=init_worker, initargs=initargs)
   return contextlib.closing(pool) if closing else pool
 
 
-def get_threadpool(num_workers, init_worker=None, closing=True):
-  pool = multiprocessing.pool.ThreadPool(processes=num_workers,
-                                         initializer=init_worker)
+def get_threadpool(num_workers, init_worker=None, initargs=None, closing=True):
+  pool = multiprocessing.pool.ThreadPool(
+      processes=num_workers, initializer=init_worker, initargs=initargs)
   return contextlib.closing(pool) if closing else pool
 
 

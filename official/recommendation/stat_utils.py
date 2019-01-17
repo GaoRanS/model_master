@@ -45,7 +45,7 @@ def permutation(args):
 
   # If seed is None NumPy will seed randomly.
   state = np.random.RandomState(seed=seed)  # pylint: disable=no-member
-  output = np.arange(x, dtype=np.int32)
+  output = np.arange(x, dtype=np.int64)
   state.shuffle(output)
   return output
 
