@@ -107,7 +107,7 @@ class DatasetManager(object):
     self._epochs_requested = 0
     self._shard_root = shard_root
 
-    self._result_queue = queue.Queue()
+    self._result_queue = queue.Queue(maxsize=1000)
     self._result_reuse = []
 
   @property
@@ -222,9 +222,12 @@ class DatasetManager(object):
     assert self._is_training or epochs_between_evals == 1
 
     if self._is_training:
-      for _ in range(self._batches_per_epoch * epochs_between_evals):
-        yield self._result_queue.get(timeout=300)
-
+      qsize_counter, idx = 0, 0
+      for idx in range(self._batches_per_epoch * epochs_between_evals):
+        qsize_counter += self._result_queue.qsize()
+        result = self._result_queue.get(timeout=300)
+        yield result
+      tf.logging.info("Mean qsize: {:.1f}".format(qsize_counter / (idx + 1)))
     else:
       if self._result_reuse:
         assert len(self._result_reuse) == self._batches_per_epoch
@@ -450,10 +453,10 @@ class BaseDataConstructor(threading.Thread):
     self.construct_lookup_variables()
     gc.collect()
 
-    self._master_pool_worker_count = 6
+    self._master_pool_worker_count = 32
     self._master_pool = popen_helper.get_forkpool(
-      6, init_worker=worker_init_fn, initargs=(self._lookup_variables,),
-      closing=False)
+        self._master_pool_worker_count, init_worker=worker_init_fn,
+        initargs=(self._lookup_variables,), closing=False)
     atexit.register(self._master_pool.terminate)
     atexit.register(self._master_pool.join)
 
@@ -586,8 +589,8 @@ class BaseDataConstructor(threading.Thread):
       return
 
     self._train_dataset.start_construction()
-    map_args = [(i, self.lookup_negative_items) for i
-                in range(self.train_batches_per_epoch)]
+    map_args = ((i, self.lookup_negative_items) for i
+                in range(self.train_batches_per_epoch))
 
     for batch in self._master_pool.imap(self._get_training_batch, map_args):
       self._train_dataset.put(*batch)
