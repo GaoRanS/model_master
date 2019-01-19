@@ -22,6 +22,7 @@ import atexit
 import collections
 import functools
 import gc
+import mmap
 import multiprocessing
 import os
 import sys
@@ -330,7 +331,10 @@ def to_mmap(x, name):
 
 def from_mmap(spec):
   # type: (MMAPSPEC) -> np.ndarray
-  x = np.fromfile(spec.buffer, dtype=spec.dtype).reshape(spec.shape)  # type: np.ndarray
+  f = os.open(spec.buffer, os.O_RDONLY)
+  atexit.register(os.close, fd=f)
+  buffer = mmap.mmap(f, 0, access=mmap.ACCESS_READ)
+  x = np.frombuffer(buffer, dtype=spec.dtype).reshape(spec.shape)  # type: np.ndarray
   x.flags.writeable = False
   return x
 
