@@ -77,3 +77,5 @@ NUM_FILE_SHARDS = 16
 TRAIN_FOLDER_TEMPLATE = "training_cycle_{}"
 EVAL_FOLDER = "eval_data"
 SHARD_TEMPLATE = "shard_{}.tfrecords"
+
+MMAP_CACHE = "/tmp/ncf_mmap_cache"

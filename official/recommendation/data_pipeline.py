@@ -19,7 +19,9 @@ from __future__ import division
 from __future__ import print_function
 
 import atexit
+import collections
 import functools
+import gc
 import multiprocessing
 import os
 import sys
@@ -311,25 +313,37 @@ class DatasetManager(object):
 
 
 _WORKER_CACHE = {}
+MMAPSPEC = collections.namedtuple("MMapSpec", ["buffer", "dtype", "shape"])
+def to_mmap(x, name):
+  # type: (np.ndarray, str) -> MMAPSPEC
+  buffer_path = os.path.join(rconst.MMAP_CACHE, "{}.buffer".format(name))
+  if tf.gfile.Exists(buffer_path):
+    raise ValueError("{} exists".format(buffer_path))
+
+  x.tofile(buffer_path)
+  atexit.register(tf.gfile.Remove, filename=buffer_path)
+  return MMAPSPEC(buffer=buffer_path, dtype=x.dtype, shape=x.shape)
+
+
+def from_mmap(spec):
+  # type: (MMAPSPEC) -> np.ndarray
+  x = np.fromfile(spec.buffer, dtype=spec.dtype).reshape(spec.shape)  # type: np.ndarray
+  x.flags.writeable = False
+  return x
+
+
 def worker_init_fn(lookup_variables):
   # type: (dict) -> None
   try:
     for key, value in lookup_variables.items():
-      if isinstance(value, tuple):
-        assert len(value) == 2
-        value = np.frombuffer(value[0], dtype=value[1])
+      if isinstance(value, MMAPSPEC):
+        value = from_mmap(value)
 
       _WORKER_CACHE[key] = value
-  except Exception as e:
+  except Exception:
     traceback.print_exc()
     sys.stderr.flush()
     raise
-
-
-def to_sharable(x):
-  # type: (np.ndarray) -> tuple
-  assert isinstance(x, np.ndarray)
-  return multiprocessing.RawArray("b", memoryview(x).tobytes()), x.dtype
 
 
 class BaseDataConstructor(threading.Thread):
@@ -399,11 +413,6 @@ class BaseDataConstructor(threading.Thread):
     self.eval_batches_per_epoch = self._count_batches(
         self._eval_elements_in_epoch, eval_batch_size, batches_per_eval_step)
 
-    # Intermediate artifacts
-    self._current_epoch_order = np.empty(shape=(0,))
-    self._shuffle_iterator = None
-
-    self._shuffle_with_forkpool = not stream_files
     if stream_files:
       self._shard_root = tempfile.mkdtemp(prefix="ncf_")
       atexit.register(tf.gfile.DeleteRecursively, dirname=self._shard_root)
@@ -425,19 +434,21 @@ class BaseDataConstructor(threading.Thread):
     self.deterministic = deterministic
 
     # Share constants with workers.
+    self.initialize_mmap_cache()
     self._lookup_variables = {
       "num_users": self._num_users,
       "num_items": self._num_items,
+      "elements_in_epoch": self._elements_in_epoch,
       "train_pos_count": self._train_pos_count,
       "train_batch_size": self.train_batch_size,
-      "train_pos_users": to_sharable(self._train_pos_users),
-      "train_pos_items": to_sharable(self._train_pos_items),
+      "train_pos_users": to_mmap(self._train_pos_users, "train_pos_users"),
+      "train_pos_items": to_mmap(self._train_pos_items, "train_pos_items"),
       "eval_users_per_batch": self._eval_users_per_batch,
       "eval_pos_users": self._eval_pos_users,
       "eval_pos_items": self._eval_pos_items,
     }
-    self.initialize_lookup_variables()
     self.construct_lookup_variables()
+    gc.collect()
 
     self._master_pool_worker_count = 6
     self._master_pool = popen_helper.get_forkpool(
@@ -458,6 +469,12 @@ class BaseDataConstructor(threading.Thread):
         eval_batch_ct=self.eval_batches_per_epoch, multiplier=multiplier)
     return super(BaseDataConstructor, self).__str__() + "\n" + summary
 
+  def initialize_mmap_cache(self):
+    if tf.gfile.Exists(rconst.MMAP_CACHE):
+      tf.gfile.DeleteRecursively(rconst.MMAP_CACHE)
+
+    tf.gfile.MakeDirs(rconst.MMAP_CACHE)
+
   @staticmethod
   def _count_batches(example_count, batch_size, batches_per_step):
     """Determine the number of batches, rounding up to fill all devices."""
@@ -466,10 +483,6 @@ class BaseDataConstructor(threading.Thread):
 
   def stop_loop(self):
     self._stop_loop = True
-
-  def initialize_lookup_variables(self):
-    self._lookup_variables["current_epoch_order"] = to_sharable(
-      np.zeros(shape=self._elements_in_epoch, dtype=np.int64))
 
   def construct_lookup_variables(self):
     """Perform any one time pre-compute work."""
@@ -501,18 +514,8 @@ class BaseDataConstructor(threading.Thread):
       raise
 
   def _start_shuffle_iterator(self):
-    if self._shuffle_with_forkpool:
-      pool = popen_helper.get_forkpool(3, closing=False)
-    else:
-      pool = popen_helper.get_threadpool(1, closing=False)
-    atexit.register(pool.close)
-    args = [(self._elements_in_epoch, stat_utils.random_int32())
-            for _ in range(self._maximum_number_epochs)]
-    imap = pool.imap if self.deterministic else pool.imap_unordered
-
-    map_fn = (stat_utils.permutation if self._use_permutation else
-              stat_utils.randint_selection)
-    self._shuffle_iterator = imap(map_fn, args)
+    if self._use_permutation:
+      raise NotImplementedError("Full shuffle support is not in this prototype.")
 
   @staticmethod
   def _get_training_batch(args):
@@ -521,15 +524,16 @@ class BaseDataConstructor(threading.Thread):
     i, lookup_negative_items = args
 
     train_batch_size = _WORKER_CACHE["train_batch_size"]
-    _current_epoch_order = _WORKER_CACHE["current_epoch_order"]
     _train_pos_count = _WORKER_CACHE["train_pos_count"]
     _train_pos_users = _WORKER_CACHE["train_pos_users"]
     _train_pos_items = _WORKER_CACHE["train_pos_items"]
     _num_users = _WORKER_CACHE["num_users"]
     _num_items = _WORKER_CACHE["num_items"]
+    _elements_in_epoch = _WORKER_CACHE["elements_in_epoch"]
 
-    batch_indices = _current_epoch_order[i * train_batch_size:
-                                         (i + 1) * train_batch_size]
+    np.random.seed()
+    batch_indices = np.random.randint(low=0, high=_elements_in_epoch,
+                                      size=(train_batch_size,), dtype=np.int64)
     (mask_start_index,) = batch_indices.shape
 
     batch_ind_mod = np.mod(batch_indices, _train_pos_count)
@@ -584,11 +588,6 @@ class BaseDataConstructor(threading.Thread):
     self._train_dataset.start_construction()
     map_args = [(i, self.lookup_negative_items) for i
                 in range(self.train_batches_per_epoch)]
-
-    self._current_epoch_order = next(self._shuffle_iterator)
-
-    assert self._current_epoch_order.dtype == self._lookup_variables["current_epoch_order"][1]
-    self._lookup_variables["current_epoch_order"][0][:] = memoryview(self._current_epoch_order).tobytes()
 
     for batch in self._master_pool.imap(self._get_training_batch, map_args):
       self._train_dataset.put(*batch)
@@ -770,7 +769,6 @@ class BisectionDataConstructor(BaseDataConstructor):
     super(BisectionDataConstructor, self).__init__(*args, **kwargs)
     self.index_bounds = None
     self._sorted_train_pos_items = None
-    self._total_negatives = None
 
   def _index_segment(self, user):
     lower, upper = self.index_bounds[user:user+2]
@@ -786,7 +784,8 @@ class BisectionDataConstructor(BaseDataConstructor):
     inner_bounds = np.argwhere(self._train_pos_users[1:] -
                                self._train_pos_users[:-1])[:, 0] + 1
     (upper_bound,) = self._train_pos_users.shape
-    self.index_bounds = np.array([0] + inner_bounds.tolist() + [upper_bound])
+    self.index_bounds = np.array([0] + inner_bounds.tolist() + [upper_bound],
+                                 dtype=np.int64)
 
     # Later logic will assume that the users are in sequential ascending order.
     assert np.array_equal(self._train_pos_users[self.index_bounds[:-1]],
@@ -798,13 +797,13 @@ class BisectionDataConstructor(BaseDataConstructor):
       lower, upper = self.index_bounds[i:i+2]
       self._sorted_train_pos_items[lower:upper].sort()
 
-    self._total_negatives = np.concatenate([
+    total_negatives = np.concatenate([
         self._index_segment(i) for i in range(self._num_users)])
 
     # Share constants with workers.
-    self._lookup_variables["index_bounds"] = to_sharable(self.index_bounds)
-    self._lookup_variables["total_negatives"] = to_sharable(self._total_negatives)
-    self._lookup_variables["sorted_train_pos_items"] = to_sharable(self._sorted_train_pos_items)
+    self._lookup_variables["index_bounds"] = to_mmap(self.index_bounds, "index_bounds")
+    self._lookup_variables["total_negatives"] = to_mmap(total_negatives, "total_negatives")
+    self._lookup_variables["sorted_train_pos_items"] = to_mmap(self._sorted_train_pos_items, "sorted_train_pos_items")
 
     tf.logging.info("Negative total vector built. Time: {:.1f} seconds".format(
         timeit.default_timer() - start_time))
