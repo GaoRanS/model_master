@@ -70,7 +70,7 @@ def main(raw_path):
     rconst.TRAIN_USER_KEY: np.concatenate(user_data).astype(rconst.USER_DTYPE),
     rconst.TRAIN_ITEM_KEY: np.concatenate(item_data).astype(rconst.ITEM_DTYPE),
     rconst.EVAL_USER_KEY: np.array(user_eval_data, dtype=rconst.USER_DTYPE),
-    rconst.EVAL_ITEM_KEY: np.array(user_eval_data, dtype=rconst.ITEM_DTYPE),
+    rconst.EVAL_ITEM_KEY: np.array(item_eval_data, dtype=rconst.ITEM_DTYPE),
     rconst.USER_MAP: {i for i in range(user_id + 1)},
     rconst.ITEM_MAP: {i for i in range(item_max + 1)},
     "create_time": time.time() + int(1e10),  # never invalidate.
