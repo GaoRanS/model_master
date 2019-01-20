@@ -52,7 +52,7 @@ def main(raw_path):
         np.random.shuffle(items)
 
         user_eval_data.append(user_id)
-        item_eval_data.append(items.pop)
+        item_eval_data.append(items.pop())
 
         user_data.append([user_id] * len(items))
         item_data.append(items)
