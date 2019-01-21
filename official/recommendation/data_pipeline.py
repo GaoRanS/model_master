@@ -460,6 +460,7 @@ class BaseDataConstructor(threading.Thread):
       tf.gfile.DeleteRecursively(rconst.MMAP_CACHE)
 
     tf.gfile.MakeDirs(rconst.MMAP_CACHE)
+    tf.gfile.MakeDirs(rconst.BATCH_FILE_DIR)
 
   @staticmethod
   def _count_batches(example_count, batch_size, batches_per_step):
