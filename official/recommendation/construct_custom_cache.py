@@ -32,12 +32,17 @@ from official.recommendation import constants as rconst
 def pkl_iterator(path, max_count):
   with open(path, "rb") as f:
     count = 0
+    user_id = -1
     while True:
       try:
         x = pickle.load(f)
         count += len(x)
+        user_id += 1
         if count >= max_count:
           break
+
+        if not (user_id + 1) % 10000:
+          print(str(user_id + 1).ljust(10), "{:.2E}".format(count))
 
         yield x
 
@@ -55,9 +60,6 @@ def main(raw_path, max_count=int(1e15)):
   for user_id, items in enumerate(pkl_iterator(raw_path, max_count)):
     for i in items:
       item_counts[i] += 1
-
-    if not (user_id + 1) % 10000:
-      print(user_id + 1)
 
   print("Computing dataset statistics.")
   num_positives = sum(item_counts.values())
@@ -93,9 +95,6 @@ def main(raw_path, max_count=int(1e15)):
     train_items[start_ind:start_ind + len(items)] = np.array(
         items, dtype=rconst.ITEM_DTYPE)
     start_ind += len(items)
-
-    if not (user_id + 1) % 10000:
-      print(str(user_id + 1).ljust(10), "{:.2E}".format(count))
 
   assert start_ind == num_train_pts
   assert not np.any(train_users == -1)
