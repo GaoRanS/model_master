@@ -71,6 +71,10 @@ def main(raw_path, max_count=int(1e15)):
   num_users = user_id + 1
   num_items = len(item_map)
 
+  print("num_pts:  ", num_positives)
+  print("num_users:", num_users)
+  print("num_items:", num_items)
+
   assert num_users <= np.iinfo(rconst.USER_DTYPE).max
   assert num_items <= np.iinfo(rconst.ITEM_DTYPE).max
 
