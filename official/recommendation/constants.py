@@ -14,6 +14,7 @@
 # ==============================================================================
 """Central location for NCF specific values."""
 
+import os
 import sys
 
 import numpy as np
@@ -79,3 +80,4 @@ EVAL_FOLDER = "eval_data"
 SHARD_TEMPLATE = "shard_{}.tfrecords"
 
 MMAP_CACHE = "/tmp/ncf_mmap_cache"
+BATCH_FILE_DIR = os.path.join(MMAP_CACHE, "serialized_batches")

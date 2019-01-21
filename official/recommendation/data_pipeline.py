@@ -32,6 +32,7 @@ import time
 import timeit
 import traceback
 import typing
+import uuid
 
 import numpy as np
 import six
@@ -75,15 +76,20 @@ _EVAL_FEATURE_MAP = {
 }
 
 
-def _put(index, data, is_training, result_queue):
-  # type: (int, dict, bool, multiprocessing.Queue) -> None
-  if is_training:
-    mask_start_index = data.pop(rconst.MASK_START_INDEX)
-    batch_size = data[movielens.ITEM_COLUMN].shape[0]
-    data[rconst.VALID_POINT_MASK] = np.less(np.arange(batch_size),
-                                            mask_start_index)
-    data = (data, data.pop("labels"))
-  result_queue.put(data)
+def batch_to_file(data):
+  # type: (dict) -> str
+  fpath = os.path.join(rconst.BATCH_FILE_DIR, str(uuid.uuid4()))
+  feature_dict = {
+    k: tf.train.Feature(bytes_list=tf.train.BytesList(
+        value=[memoryview(v).tobytes()])) for k, v in data.items()}
+
+  data_bytes = tf.train.Example(
+      features=tf.train.Features(feature=feature_dict)).SerializeToString()
+
+  with tf.gfile.Open(fpath, "wb") as f:
+    f.write(data_bytes)
+
+  return fpath
 
 
 class DatasetManager(object):
@@ -119,8 +125,7 @@ class DatasetManager(object):
     self._epochs_requested = 0
     self._shard_root = shard_root
 
-    self._manager = multiprocessing.Manager()
-    self._result_queue = self._manager.Queue(maxsize=1000)
+    self._result_queue = queue.Queue()
     self._result_reuse = []
 
   @property
@@ -185,13 +190,12 @@ class DatasetManager(object):
         rconst.DUPLICATE_MASK: decode_binary(features[rconst.DUPLICATE_MASK]),
     }
 
-  def get_put_fn(self):
+  def put(self, fpath):
     if self._stream_files:
       raise NotImplementedError("Shared file writers have not been migrated in "
                                 "this prototype.")
 
-    return functools.partial(_put, is_training=self._is_training,
-                             result_queue=self._result_queue)
+    return self._result_queue.put(fpath)
 
   def start_construction(self):
     if self._stream_files:
@@ -217,20 +221,27 @@ class DatasetManager(object):
       qsize_counter, idx = 0, 0
       for idx in range(self._batches_per_epoch * epochs_between_evals):
         qsize_counter += self._result_queue.qsize()
-        result = self._result_queue.get(timeout=300)
+        batch_path = self._result_queue.get(timeout=300)
+        with tf.gfile.Open(batch_path, "rb") as f:
+          result = f.read()
+        tf.gfile.Remove(batch_path)
         yield result
       tf.logging.info("Mean qsize: {:.1f}".format(qsize_counter / (idx + 1)))
     else:
       if self._result_reuse:
         assert len(self._result_reuse) == self._batches_per_epoch
 
-        for i in self._result_reuse:
-          yield i
+        for batch_path in self._result_reuse:
+          with tf.gfile.Open(batch_path, "rb") as f:
+            result = f.read()
+          yield result
       else:
         # First epoch.
         for _ in range(self._batches_per_epoch * epochs_between_evals):
-          result = self._result_queue.get(timeout=300)
-          self._result_reuse.append(result)
+          batch_path = self._result_queue.get(timeout=300)
+          with tf.gfile.Open(batch_path, "rb") as f:
+            result = f.read()
+          self._result_reuse.append(batch_path)
           yield result
 
 
@@ -248,44 +259,18 @@ class DatasetManager(object):
     """
     self._epochs_requested += 1
     if self._stream_files:
-      if epochs_between_evals > 1:
-        raise ValueError("epochs_between_evals > 1 not supported for file "
-                         "based dataset.")
-      epoch_data_dir = self._result_queue.get(timeout=300)
-      if not self._is_training:
-        self._result_queue.put(epoch_data_dir)  # Eval data is reused.
-
-      file_pattern = os.path.join(
-          epoch_data_dir, rconst.SHARD_TEMPLATE.format("*"))
-      dataset = StreamingFilesDataset(
-          files=file_pattern, worker_job="worker",
-          num_parallel_reads=rconst.NUM_FILE_SHARDS, num_epochs=1,
-          sloppy=not self._deterministic)
-      map_fn = functools.partial(self._deserialize, batch_size=batch_size)
-      dataset = dataset.map(map_fn, num_parallel_calls=16)
+      raise NotImplementedError("StreamingFilesDataset has been removed from "
+                                "this prototype.")
 
     else:
-      types = {movielens.USER_COLUMN: rconst.USER_DTYPE,
-               movielens.ITEM_COLUMN: rconst.ITEM_DTYPE}
-      shapes = {movielens.USER_COLUMN: tf.TensorShape([batch_size]),
-                movielens.ITEM_COLUMN: tf.TensorShape([batch_size])}
-
-      if self._is_training:
-        types[rconst.VALID_POINT_MASK] = np.bool
-        shapes[rconst.VALID_POINT_MASK] = tf.TensorShape([batch_size])
-
-        types = (types, np.bool)
-        shapes = (shapes, tf.TensorShape([batch_size]))
-
-      else:
-        types[rconst.DUPLICATE_MASK] = np.bool
-        shapes[rconst.DUPLICATE_MASK] = tf.TensorShape([batch_size])
-
       data_generator = functools.partial(
           self.data_generator, epochs_between_evals=epochs_between_evals)
       dataset = tf.data.Dataset.from_generator(
-          generator=data_generator, output_types=types,
-          output_shapes=shapes)
+          generator=data_generator, output_types=tf.string,
+          output_shapes=tf.TensorShape([]))
+
+      map_fn = functools.partial(self._deserialize, batch_size=batch_size)
+      dataset = dataset.map(map_fn, num_parallel_calls=16)
 
     return dataset.prefetch(16)
 
@@ -452,8 +437,11 @@ class BaseDataConstructor(threading.Thread):
     self._master_pool = popen_helper.get_forkpool(
         self._master_pool_worker_count, init_worker=worker_init_fn,
         initargs=(self._lookup_variables,), closing=False)
-    atexit.register(self._master_pool.terminate)
+
+    # atexit will run functions in reverse order of registration.
     atexit.register(self._master_pool.join)
+    atexit.register(self._master_pool.terminate)
+
 
   def __str__(self):
     multiplier = ("(x{} devices)".format(self._batches_per_train_step)
@@ -519,7 +507,7 @@ class BaseDataConstructor(threading.Thread):
   def _get_training_batch(args):
     """Construct a single batch of training data.
     """
-    i, lookup_negative_items, put_fn = args
+    i, lookup_negative_items = args
 
     train_batch_size = _WORKER_CACHE["train_batch_size"]
     _train_pos_count = _WORKER_CACHE["train_pos_count"]
@@ -560,7 +548,7 @@ class BaseDataConstructor(threading.Thread):
       items = np.concatenate([items, item_pad])
       labels = np.concatenate([labels, label_pad])
 
-    put_fn(i, {
+    return batch_to_file({
       movielens.USER_COLUMN: users,
       movielens.ITEM_COLUMN: items,
       rconst.MASK_START_INDEX: np.array(mask_start_index, dtype=np.int32),
@@ -584,11 +572,13 @@ class BaseDataConstructor(threading.Thread):
       return
 
     self._train_dataset.start_construction()
-    put_fn = self._train_dataset.get_put_fn()
-    map_args = ((i, self.lookup_negative_items, put_fn) for i
+    map_args = ((i, self.lookup_negative_items) for i
                 in range(self.train_batches_per_epoch))
 
-    self._master_pool.map(self._get_training_batch, map_args)
+    for batch_fpath in self._master_pool.imap_unordered(
+        self._get_training_batch, map_args):
+      self._train_dataset.put(batch_fpath)
+
     self._train_dataset.end_construction()
 
     tf.logging.info("Epoch construction complete. Time: {:.1f} seconds".format(
@@ -641,7 +631,7 @@ class BaseDataConstructor(threading.Thread):
     Args:
       i: The index of the batch.
     """
-    i, lookup_negative_items, _assemble_eval_batch, put_fn = args
+    i, lookup_negative_items, _assemble_eval_batch = args
 
     _eval_users_per_batch = _WORKER_CACHE["eval_users_per_batch"]
     _eval_pos_users = _WORKER_CACHE["eval_pos_users"]
@@ -658,11 +648,12 @@ class BaseDataConstructor(threading.Thread):
     users, items, duplicate_mask = _assemble_eval_batch(
         users, positive_items, negative_items, _eval_users_per_batch)
 
-    put_fn(i, {
+    return batch_to_file({
       movielens.USER_COLUMN: users.flatten(),
       movielens.ITEM_COLUMN: items.flatten(),
       rconst.DUPLICATE_MASK: duplicate_mask.flatten(),
     })
+
 
   def _construct_eval_epoch(self):
     """Loop to construct data for evaluation."""
@@ -672,11 +663,13 @@ class BaseDataConstructor(threading.Thread):
     start_time = timeit.default_timer()
 
     self._eval_dataset.start_construction()
-    put_fn = self._eval_dataset.get_put_fn()
-    map_args = ((i, self.lookup_negative_items, self._assemble_eval_batch,
-                 put_fn) for i in range(self.eval_batches_per_epoch))
+    map_args = ((i, self.lookup_negative_items, self._assemble_eval_batch)
+                for i in range(self.eval_batches_per_epoch))
 
-    self._master_pool.map(self._get_eval_batch, map_args)
+    for batch_fpath in self._master_pool.imap_unordered(
+        self._get_eval_batch, map_args):
+      self._eval_dataset.put(batch_fpath)
+
     self._eval_dataset.end_construction()
 
     tf.logging.info("Eval construction complete. Time: {:.1f} seconds".format(
