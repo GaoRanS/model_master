@@ -39,7 +39,6 @@ from absl import flags
 import tensorflow as tf
 # pylint: enable=g-bad-import-order
 
-from tensorflow.contrib.compiler import xla
 from official.datasets import movielens
 from official.recommendation import constants as rconst
 from official.recommendation import data_pipeline
@@ -85,7 +84,9 @@ def run_ncf(_):
     keras_model = _get_keras_model(params)
 
     optimizer = ncf_common.get_optimizer(params)
-    keras_model.compile(optimizer=optimizer)
+    keras_model.compile(
+        loss='categorical_crossentropy',
+        optimizer=optimizer)
 
     train_input_dataset, eval_input_dataset = _get_train_and_eval_data(producer, params)
 
@@ -97,14 +98,16 @@ def run_ncf(_):
 
     tf.logging.info("Training done. Start evaluating")
 
+    '''
     eval_results = keras_model.evaluate(
         eval_input_dataset,
         steps=num_eval_steps,
         verbose=2)
 
     tf.logging.info("Keras evaluation is done.")
+    '''
 
-  return eval_results
+  # return eval_results
 
 
 def _get_keras_model(params):
@@ -115,22 +118,16 @@ def _get_keras_model(params):
       shape=(), batch_size=batch_size, name=movielens.ITEM_COLUMN, dtype=tf.int32)
 
   # Dummy duplicate mask. We need it because it is part of the eval input
+  '''
   dup_mask_input = tf.keras.layers.Input(
       shape=(), batch_size=batch_size, name=rconst.DUPLICATE_MASK, dtype=tf.int32)
-  # Labels as input for the custom loss function
-  labels_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name="labels", dtype=tf.int32)
-  # valid_point_mask as input for the custom loss function
-  valid_pt_mask_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=rconst.VALID_POINT_MASK, dtype=tf.int32)
+  '''
 
   base_model = neumf_model.construct_model(user_input, item_input, params)
 
   keras_model_inputs = base_model.inputs
 
-  keras_model_inputs.append(dup_mask_input)
-  keras_model_inputs.append(labels_input)
-  keras_model_inputs.append(valid_pt_mask_input)
+  # keras_model_inputs.append(dup_mask_input)
 
   keras_model = tf.keras.Model(
       inputs=keras_model_inputs,
@@ -140,13 +137,16 @@ def _get_keras_model(params):
   logits = keras_model.output
   softmax_logits = ncf_common.convert_to_softmax_logits(logits)
 
+  '''
   loss_tensor = tf.losses.sparse_softmax_cross_entropy(
       labels=labels_input,
       logits=softmax_logits,
       weights=tf.cast(valid_pt_mask_input, tf.float32))
 
   keras_model.add_loss(loss_tensor)
+  '''
 
+  '''
   hit_rate_metric = _get_hit_rate_metric(
       logits,
       softmax_logits,
@@ -155,11 +155,11 @@ def _get_keras_model(params):
         params["match_mlperf"],
         params["use_xla_for_gpu"])
 
-
   keras_model.add_metric(
       hit_rate_metric,
       name='hit_rate',
       aggregation='mean')
+  '''
 
   return keras_model
 
@@ -196,10 +196,7 @@ def _get_train_and_eval_data(producer, params):
     # Add a dummy dup_mask to the input dataset, because it is part of the
     # model's input layres, which is because it is part of the eval input
     # data
-    features[rconst.DUPLICATE_MASK] = tf.zeros_like(
-        features[movielens.USER_COLUMN], dtype=tf.float32)
-    features["labels"] = labels
-    return features, labels
+    return features, labels, features[rconst.VALID_POINT_MASK]
 
 
   train_input_fn = producer.make_input_fn(is_training=True)
@@ -208,8 +205,6 @@ def _get_train_and_eval_data(producer, params):
   train_input_dataset = train_input_dataset.repeat(FLAGS.train_epochs)
 
   def preprocess_eval_input(features):
-    features["labels"] = tf.zeros_like(features['user_id'], dtype=tf.float32)
-    features[rconst.VALID_POINT_MASK] = tf.zeros_like(features['user_id'], dtype=tf.float32)
     return features
 
   eval_input_fn = producer.make_input_fn(is_training=False)
