@@ -172,7 +172,6 @@ def _get_compiled_keras_model(params):
 
   keras_model.compile(
       loss="sparse_categorical_crossentropy",
-      sample_weight_mode="temporal",
       optimizer=optimizer)
 
   return keras_model
