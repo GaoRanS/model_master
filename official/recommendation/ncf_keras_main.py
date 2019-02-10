@@ -53,6 +53,8 @@ from official.utils.misc import distribution_utils
 from official.utils.misc import model_helpers
 
 
+tf.enable_eager_execution()
+
 FLAGS = flags.FLAGS
 
 
@@ -70,6 +72,8 @@ def run_ncf(_):
   params = ncf_common.parse_flags(FLAGS)
 
   distribution = ncf_common.get_distribution_strategy(params)
+  print(">>>>>>>>>>>>>>>>>>>>> zhenzheng distribution: ", distribution)
+  print(">>>>>>>>>>>>>>>>>>>>> zhenzheng batches_per_step: ", params["batches_per_step"])
 
   num_users, num_items, num_train_steps, num_eval_steps, producer = (
       ncf_common.get_inputs(params))
@@ -78,17 +82,22 @@ def run_ncf(_):
   producer.start()
   model_helpers.apply_clean(flags.FLAGS)
 
-  # TODO(shiningsun): Both MirroredStrategy and OneDeviceStrategy error out.
-  # Find out why and change the distribute to distribution
-  with distribution_utils.MaybeDistributionScope(None):
-    keras_model = _get_keras_model(params)
+  with distribution_utils.MaybeDistributionScope(distribution):
+    keras_model = _get_compiled_keras_model(params)
 
-    optimizer = ncf_common.get_optimizer(params)
-    keras_model.compile(
-        loss='categorical_crossentropy',
-        optimizer=optimizer)
-
+    batches_per_step = params["batches_per_step"]
+    print(">>>>>>>>>>>>>>zhenzhen batches_per_step: ", batches_per_step)
     train_input_dataset, eval_input_dataset = _get_train_and_eval_data(producer, params)
+    train_input_dataset = train_input_dataset.batch(batches_per_step)
+    print(">>>>>>>>>>>>>>zhenzhen train_input_dataset: ", train_input_dataset)
+
+    '''
+    for d in train_input_dataset:
+      print(">>>>>>>>>>>>>>zhenzhen: ", d)
+      break;
+
+    # import sys; sys.exit()
+    '''
 
     keras_model.fit(train_input_dataset,
         epochs=FLAGS.train_epochs,
@@ -96,9 +105,9 @@ def run_ncf(_):
         callbacks=[IncrementEpochCallback(producer)],
         verbose=2)
 
+    '''
     tf.logging.info("Training done. Start evaluating")
 
-    '''
     eval_results = keras_model.evaluate(
         eval_input_dataset,
         steps=num_eval_steps,
@@ -110,58 +119,80 @@ def run_ncf(_):
   # return eval_results
 
 
-def _get_keras_model(params):
+def _strip_first_dimension(x):
+  return x[0, :]
+
+def _get_compiled_keras_model(params):
   batch_size = params['batch_size']
+
   user_input = tf.keras.layers.Input(
       shape=(), batch_size=batch_size, name=movielens.USER_COLUMN, dtype=tf.int32)
   item_input = tf.keras.layers.Input(
       shape=(), batch_size=batch_size, name=movielens.ITEM_COLUMN, dtype=tf.int32)
 
-  # Dummy duplicate mask. We need it because it is part of the eval input
-  '''
-  dup_mask_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=rconst.DUPLICATE_MASK, dtype=tf.int32)
-  '''
+  base_model = neumf_model.construct_model(
+      user_input, item_input, params)
 
-  base_model = neumf_model.construct_model(user_input, item_input, params)
+  # The following two layers act as the input layer to the keras_model.
+  # The reason for them is that we did a dataset.batch() for the purpose of using
+  # distribution strategies in data_pipeline.py
+  user_input_1 = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=1,
+      name=movielens.USER_COLUMN,
+      dtype=tf.int32)
+  item_input_1 = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=1,
+      name=movielens.ITEM_COLUMN,
+      dtype=tf.int32)
+  # valid_point_mask as input for the custom loss function
+  valid_pt_mask_input = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=1,
+      name=rconst.VALID_POINT_MASK,
+      dtype=tf.bool)
 
-  keras_model_inputs = base_model.inputs
+  user_input_reshape = tf.keras.layers.Lambda(
+      lambda x: _strip_first_dimension(x))(user_input_1)
+  item_input_reshape = tf.keras.layers.Lambda(
+      lambda x: _strip_first_dimension(x))(item_input_1)
+  valid_pt_mask_input_reshape = tf.keras.layers.Lambda(
+      lambda x: _strip_first_dimension(x))(valid_pt_mask_input)
 
-  # keras_model_inputs.append(dup_mask_input)
+  base_model_output = base_model([user_input_reshape, item_input_reshape])
 
   keras_model = tf.keras.Model(
-      inputs=keras_model_inputs,
-      outputs=base_model.outputs)
+      inputs=[user_input_1, item_input_1],
+      outputs=base_model_output)
+
   keras_model.summary()
 
-  logits = keras_model.output
-  softmax_logits = ncf_common.convert_to_softmax_logits(logits)
+  optimizer = ncf_common.get_optimizer(params)
 
-  '''
-  loss_tensor = tf.losses.sparse_softmax_cross_entropy(
-      labels=labels_input,
-      logits=softmax_logits,
-      weights=tf.cast(valid_pt_mask_input, tf.float32))
-
-  keras_model.add_loss(loss_tensor)
-  '''
-
-  '''
-  hit_rate_metric = _get_hit_rate_metric(
-      logits,
-      softmax_logits,
-      tf.cast(dup_mask_input, tf.float32),
-        params["num_neg"],
-        params["match_mlperf"],
-        params["use_xla_for_gpu"])
-
-  keras_model.add_metric(
-      hit_rate_metric,
-      name='hit_rate',
-      aggregation='mean')
-  '''
+  keras_model.compile(
+      loss="sparse_categorical_crossentropy",
+      sample_weight_mode="temporal",
+      optimizer=optimizer)
 
   return keras_model
+
+
+def _get_loss_fn(valid_pt_mask_input_reshape):
+  def keras_loss_fn(y_true, y_pred, sample_weights=None):
+    softmax_logtis = ncf_common.convert_to_softmax_logits(y_pred)
+
+    y_true = _strip_first_dimension(y_true)
+
+    batch_losses = tf.keras.losses.sparse_categorical_crossentropy(
+        y_true,
+        softmax_logtis,
+        from_logits=True)
+
+    result = batch_losses * tf.cast(valid_pt_mask_input_reshape, tf.float32)
+    return result
+
+  return keras_loss_fn
 
 
 def _get_hit_rate_metric(
@@ -189,23 +220,26 @@ def _get_hit_rate_metric(
   return in_top_k
 
 
-
 def _get_train_and_eval_data(producer, params):
+  train_input_fn = producer.make_input_fn(is_training=True)
+  train_input_dataset = train_input_fn(params)
 
   def preprocess_training_input(features, labels):
     # Add a dummy dup_mask to the input dataset, because it is part of the
     # model's input layres, which is because it is part of the eval input
     # data
-    return features, labels, features[rconst.VALID_POINT_MASK]
+    print(">>>>>>>>>>>>>> features: ", features)
+    print(">>>>>>>>>>>>>> labels: ", labels)
+    return features, labels, features.pop(rconst.VALID_POINT_MASK)
 
-
-  train_input_fn = producer.make_input_fn(is_training=True)
-  train_input_dataset = train_input_fn(params).map(
-      lambda features, labels: preprocess_training_input(features, labels))
-  train_input_dataset = train_input_dataset.repeat(FLAGS.train_epochs)
+  train_input_dataset = train_input_dataset.map(
+      lambda features, labels : preprocess_training_input(features, labels))
 
   def preprocess_eval_input(features):
-    return features
+    features[rconst.VALID_POINT_MASK] = tf.zeros_like(
+        features['user_id'], dtype=tf.float32)
+    labels = tf.zeros_like(features['user_id'], dtype=tf.float32)
+    return features, labels
 
   eval_input_fn = producer.make_input_fn(is_training=False)
   eval_input_dataset = eval_input_fn(params)
