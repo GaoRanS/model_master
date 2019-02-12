@@ -72,8 +72,6 @@ def run_ncf(_):
   params = ncf_common.parse_flags(FLAGS)
 
   distribution = ncf_common.get_distribution_strategy(params)
-  print(">>>>>>>>>>>>>>>>>>>>> zhenzheng distribution: ", distribution)
-  print(">>>>>>>>>>>>>>>>>>>>> zhenzheng batches_per_step: ", params["batches_per_step"])
 
   num_users, num_items, num_train_steps, num_eval_steps, producer = (
       ncf_common.get_inputs(params))
@@ -85,19 +83,8 @@ def run_ncf(_):
   with distribution_utils.MaybeDistributionScope(distribution):
     keras_model = _get_compiled_keras_model(params)
 
-    batches_per_step = params["batches_per_step"]
-    print(">>>>>>>>>>>>>>zhenzhen batches_per_step: ", batches_per_step)
     train_input_dataset, eval_input_dataset = _get_train_and_eval_data(producer, params)
-    train_input_dataset = train_input_dataset.batch(batches_per_step)
-    print(">>>>>>>>>>>>>>zhenzhen train_input_dataset: ", train_input_dataset)
-
-    '''
-    for d in train_input_dataset:
-      print(">>>>>>>>>>>>>>zhenzhen: ", d)
-      break;
-
-    # import sys; sys.exit()
-    '''
+    train_input_dataset = train_input_dataset.batch(params["batches_per_step"])
 
     keras_model.fit(train_input_dataset,
         epochs=FLAGS.train_epochs,
@@ -119,8 +106,8 @@ def run_ncf(_):
   # return eval_results
 
 
-def _strip_first_dimension(x):
-  return x[0, :]
+def _strip_first_and_last_dimension(x, batch_size):
+  return tf.reshape(x[0, :], (batch_size,))
 
 def _get_compiled_keras_model(params):
   batch_size = params['batch_size']
@@ -137,12 +124,12 @@ def _get_compiled_keras_model(params):
   # The reason for them is that we did a dataset.batch() for the purpose of using
   # distribution strategies in data_pipeline.py
   user_input_1 = tf.keras.layers.Input(
-      shape=(batch_size,),
+      shape=(batch_size, 1),
       batch_size=1,
       name=movielens.USER_COLUMN,
       dtype=tf.int32)
   item_input_1 = tf.keras.layers.Input(
-      shape=(batch_size,),
+      shape=(batch_size, 1),
       batch_size=1,
       name=movielens.ITEM_COLUMN,
       dtype=tf.int32)
@@ -154,17 +141,30 @@ def _get_compiled_keras_model(params):
       dtype=tf.bool)
 
   user_input_reshape = tf.keras.layers.Lambda(
-      lambda x: _strip_first_dimension(x))(user_input_1)
+      lambda x: _strip_first_and_last_dimension(
+          x, batch_size))(user_input_1)
   item_input_reshape = tf.keras.layers.Lambda(
-      lambda x: _strip_first_dimension(x))(item_input_1)
+      lambda x: _strip_first_and_last_dimension(
+          x, batch_size))(item_input_1)
   valid_pt_mask_input_reshape = tf.keras.layers.Lambda(
-      lambda x: _strip_first_dimension(x))(valid_pt_mask_input)
+      lambda x: _strip_first_and_last_dimension(
+          x, batch_size))(valid_pt_mask_input)
 
   base_model_output = base_model([user_input_reshape, item_input_reshape])
+  logits= tf.keras.layers.Lambda(
+          lambda x: tf.expand_dims(x, 0),
+          name="logits")(base_model_output)
+
+  zeros = tf.keras.layers.Lambda(
+      lambda x: x * 0)(logits)
+
+  softmax_output = tf.keras.layers.concatenate(
+          [zeros, logits],
+          axis=-1)
 
   keras_model = tf.keras.Model(
       inputs=[user_input_1, item_input_1],
-      outputs=base_model_output)
+      outputs=softmax_output)
 
   keras_model.summary()
 
@@ -172,26 +172,10 @@ def _get_compiled_keras_model(params):
 
   keras_model.compile(
       loss="sparse_categorical_crossentropy",
+      sample_weight_mode="temporal",
       optimizer=optimizer)
 
   return keras_model
-
-
-def _get_loss_fn(valid_pt_mask_input_reshape):
-  def keras_loss_fn(y_true, y_pred, sample_weights=None):
-    softmax_logtis = ncf_common.convert_to_softmax_logits(y_pred)
-
-    y_true = _strip_first_dimension(y_true)
-
-    batch_losses = tf.keras.losses.sparse_categorical_crossentropy(
-        y_true,
-        softmax_logtis,
-        from_logits=True)
-
-    result = batch_losses * tf.cast(valid_pt_mask_input_reshape, tf.float32)
-    return result
-
-  return keras_loss_fn
 
 
 def _get_hit_rate_metric(
@@ -227,9 +211,15 @@ def _get_train_and_eval_data(producer, params):
     # Add a dummy dup_mask to the input dataset, because it is part of the
     # model's input layres, which is because it is part of the eval input
     # data
-    print(">>>>>>>>>>>>>> features: ", features)
-    print(">>>>>>>>>>>>>> labels: ", labels)
-    return features, labels, features.pop(rconst.VALID_POINT_MASK)
+
+    weights = features.pop(rconst.VALID_POINT_MASK)
+    for k in features:
+        tensor = features[k]
+        features[k] = tf.expand_dims(tensor, -1)
+
+    labels = tf.expand_dims(labels, -1)
+
+    return features, labels, weights
 
   train_input_dataset = train_input_dataset.map(
       lambda features, labels : preprocess_training_input(features, labels))
