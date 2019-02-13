@@ -21,45 +21,47 @@ from __future__ import print_function
 
 import collections
 import os
-import pickle
 import time
 
+import pickle
 import numpy as np
 
 from official.recommendation import constants as rconst
 
 
-def pkl_iterator(path, max_count):
-  with open(path, "rb") as f:
-    count = 0
-    user_id = -1
-    while True:
-      try:
-        x = pickle.load(f)
-        count += len(x)
-        user_id += 1
-        if count >= max_count:
+def pkl_iterator(template, shards=16):
+  for i in range(shards):
+    print("shard {}".format(i))
+    with open(template.format(i), "rb") as f:
+      x = pickle.load(f, encoding='latin1')
+      for j, data in enumerate(x):
+        yield data
+
+        if j == 400:
           break
 
-        if not (user_id + 1) % 10000:
-          print(str(user_id + 1).ljust(10), "{:.2E}".format(count))
 
-        yield x
+def main(root):
+  expansion = "4_16"
+  train_template = os.path.join(root, expansion + "_correct_train.pkl_{}")
+  test_template = os.path.join(root, expansion + "_correct_test.pkl_{}")
+  # test_template = train_template
+  num_shards = 1
+  seed = 0
 
-        if count >= max_count:
-          break
-
-      except EOFError:
-        break
-
-
-def main(raw_path, max_count=int(1e15)):
   item_counts = collections.defaultdict(int)
   user_id = -1
+  num_train_pts = 0
+  np.random.seed(seed)
   print("Starting precompute pass.")
-  for user_id, items in enumerate(pkl_iterator(raw_path, max_count)):
-    for i in items:
+  for train_items, test_items in zip(pkl_iterator(train_template, num_shards), pkl_iterator(test_template, num_shards)):
+    user_id += 1
+
+    # TODO(robieta): may as well use all the eval points?
+    for i in train_items:
       item_counts[i] += 1
+    item_counts[np.random.choice(test_items)] += 1
+    num_train_pts += len(train_items)
 
   print("Computing dataset statistics.")
   num_positives = sum(item_counts.values())
@@ -78,27 +80,23 @@ def main(raw_path, max_count=int(1e15)):
   assert num_users <= np.iinfo(rconst.USER_DTYPE).max
   assert num_items <= np.iinfo(rconst.ITEM_DTYPE).max
 
-  num_train_pts = num_positives - num_users
+  # num_train_pts = num_positives - num_users
   train_users = np.zeros(shape=num_train_pts, dtype=rconst.USER_DTYPE) - 1
   train_items = np.zeros(shape=num_train_pts, dtype=rconst.ITEM_DTYPE) - 1
   eval_users = np.arange(num_users, dtype=rconst.USER_DTYPE)
   eval_items = np.zeros(shape=num_users, dtype=rconst.ITEM_DTYPE) - 1
 
-  np.random.seed(0)
   start_ind = 0
+  np.random.seed(seed)
   print("Starting second pass.")
-  for user_id, items in enumerate(pkl_iterator(raw_path, max_count)):
-    items = [item_map[i] for i in items]
+  for user_id, [user_train_items, user_test_items] in enumerate(
+      zip(pkl_iterator(train_template, num_shards), pkl_iterator(test_template, num_shards))):
+    user_train_items = [item_map[i] for i in user_train_items]
+    eval_items[user_id] = item_map[np.random.choice(user_test_items)]
 
-    # randomly choose an item to be the holdout item
-    np.random.shuffle(items)
-
-    eval_items[user_id] = items.pop()
-
-    train_users[start_ind:start_ind + len(items)] = user_id
-    train_items[start_ind:start_ind + len(items)] = np.array(
-        items, dtype=rconst.ITEM_DTYPE)
-    start_ind += len(items)
+    train_users[start_ind:start_ind + len(user_train_items)] = user_id
+    train_items[start_ind:start_ind + len(user_train_items)] = np.array(user_train_items, dtype=rconst.ITEM_DTYPE)
+    start_ind += len(user_train_items)
 
   assert start_ind == num_train_pts
   assert not np.any(train_users == -1)
@@ -116,11 +114,11 @@ def main(raw_path, max_count=int(1e15)):
   }
 
   print("Writing record.")
-  output_path = os.path.join(os.path.split(raw_path)[0], "transformed.pkl")
+  output_path = os.path.join(root, "{}_transformed_{}_shards_used_debug.pkl".format(expansion, num_shards))
   with open(output_path, "wb") as f:
     pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == "__main__":
-  main("/tmp/ml_extended/16_32_ext_user_item_sequences.pkl", int(1e6))
+  main("/tmp/ml_take_2")
 
