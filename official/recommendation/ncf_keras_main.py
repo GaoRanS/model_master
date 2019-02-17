@@ -37,6 +37,7 @@ from official.recommendation import neumf_model
 from official.utils.logs import logger
 from official.utils.logs import mlperf_helper
 from official.utils.misc import model_helpers
+from official.utils.misc import distribution_utils
 
 
 FLAGS = flags.FLAGS
@@ -53,7 +54,7 @@ def _get_metric_fn(params):
   batch_size = params["batch_size"]
 
   def metric_fn(y_true, y_pred):
-    softmax_logits = y_pred
+    softmax_logits = y_pred[0, :]
     logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
 
     dup_mask = tf.zeros([batch_size, 1])
@@ -86,21 +87,34 @@ def _get_hit_rate_metric(
         match_mlperf,
         use_tpu_spec=use_xla_for_gpu))
 
-  in_top_k = tf.cond(
-      tf.keras.backend.learning_phase(),
-      lambda: tf.zeros(shape=in_top_k.shape, dtype=in_top_k.dtype),
-      lambda: in_top_k)
-
   return in_top_k
 
 
 def _get_train_and_eval_data(producer, params):
 
+  def preprocess_train_inpu(features, labels):
+    features.pop(rconst.VALID_POINT_MASK)
+    labels = tf.expand_dims(labels, -1)
+
+    for k in features:
+      tensor = features[k]
+      features[k] = tf.expand_dims(tensor, -1)
+
+    return features, labels
+
   train_input_fn = producer.make_input_fn(is_training=True)
-  train_input_dataset = train_input_fn(params)
+  train_input_dataset = train_input_fn(params).map(
+      preprocess_train_inpu)
 
   def preprocess_eval_input(features):
+    features.pop(rconst.DUPLICATE_MASK)
     labels = tf.zeros_like(features[movielens.USER_COLUMN])
+    labels = tf.expand_dims(labels, -1)
+
+    for k in features:
+      tensor = features[k]
+      features[k] = tf.expand_dims(tensor, -1)
+
     return features, labels
 
   eval_input_fn = producer.make_input_fn(is_training=False)
@@ -129,18 +143,24 @@ def _get_keras_model(params):
   batch_size = params['batch_size']
 
   user_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=movielens.USER_COLUMN, dtype=tf.int32)
+      shape=(batch_size, 1), batch_size=1, name=movielens.USER_COLUMN, dtype=tf.int32)
   item_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=movielens.ITEM_COLUMN, dtype=tf.int32)
+      shape=(batch_size, 1), batch_size=1, name=movielens.ITEM_COLUMN, dtype=tf.int32)
 
-  base_model = neumf_model.construct_model(user_input, item_input, params)
+  base_model = neumf_model.construct_model(
+      user_input, item_input, params, need_strip=True)
+
   base_model_output = base_model.output
 
+  logits= tf.keras.layers.Lambda(
+      lambda x: tf.expand_dims(x, 0),
+      name="logits")(base_model_output)
+
   zeros = tf.keras.layers.Lambda(
-      lambda x: x * 0)(base_model_output)
+      lambda x: x * 0)(logits)
 
   softmax_logits = tf.keras.layers.concatenate(
-      [zeros, base_model_output],
+      [zeros, logits],
       axis=-1)
 
   keras_model = tf.keras.Model(
@@ -162,29 +182,36 @@ def run_ncf(_):
   producer.start()
   model_helpers.apply_clean(flags.FLAGS)
 
-  keras_model = _get_keras_model(params)
-  optimizer = ncf_common.get_optimizer(params)
-
-  keras_model.compile(
-      loss=_keras_loss,
-      metrics=[_get_metric_fn(params)],
-      optimizer=optimizer)
-
+  batches_per_step = params["batches_per_step"]
   train_input_dataset, eval_input_dataset = _get_train_and_eval_data(producer, params)
-  keras_model.fit(train_input_dataset,
-      epochs=FLAGS.train_epochs,
-      callbacks=[IncrementEpochCallback(producer)],
-      verbose=2)
+  train_input_dataset = train_input_dataset.batch(batches_per_step)
+  eval_input_dataset = eval_input_dataset.batch(batches_per_step)
 
-  tf.logging.info("Training done. Start evaluating")
+  strategy = ncf_common.get_distribution_strategy(params)
+  # strategy = None
+  with distribution_utils.MaybeDistributionScope(strategy):
+    keras_model = _get_keras_model(params)
+    optimizer = ncf_common.get_optimizer(params)
 
-  eval_results = keras_model.evaluate(
-      eval_input_dataset,
-      steps=num_eval_steps,
-      verbose=2)
+    keras_model.compile(
+        loss=_keras_loss,
+        metrics=[_get_metric_fn(params)],
+        optimizer=optimizer)
 
-  tf.logging.info("Keras evaluation is done.")
-  return eval_results
+    keras_model.fit(train_input_dataset,
+        epochs=FLAGS.train_epochs,
+        callbacks=[IncrementEpochCallback(producer)],
+        verbose=2)
+
+    tf.logging.info("Training done. Start evaluating")
+
+    eval_results = keras_model.evaluate(
+        eval_input_dataset,
+        steps=num_eval_steps,
+        verbose=2)
+
+    tf.logging.info("Keras evaluation is done.")
+    return eval_results
 
 
 def main(_):
@@ -193,9 +220,6 @@ def main(_):
     mlperf_helper.set_ncf_root(os.path.split(os.path.abspath(__file__))[0])
     if FLAGS.tpu:
       raise ValueError("NCF in Keras does not support TPU for now")
-    if FLAGS.num_gpus > 1:
-      raise ValueError("NCF in Keras does not support distribution strategies. "
-          "Please set num_gpus to 1")
     run_ncf(FLAGS)
 
 
