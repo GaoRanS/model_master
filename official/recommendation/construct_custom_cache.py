@@ -37,16 +37,12 @@ def pkl_iterator(template, shards=16):
       for j, data in enumerate(x):
         yield data
 
-        if j == 400:
-          break
-
 
 def main(root):
-  expansion = "4_16"
+  expansion = "16_32"
   train_template = os.path.join(root, expansion + "_correct_train.pkl_{}")
   test_template = os.path.join(root, expansion + "_correct_test.pkl_{}")
-  # test_template = train_template
-  num_shards = 1
+  num_shards = 16
   seed = 0
 
   item_counts = collections.defaultdict(int)
