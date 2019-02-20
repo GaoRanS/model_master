@@ -132,11 +132,11 @@ def _get_keras_model(params):
   batch_size = params['batch_size']
 
   user_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=movielens.USER_COLUMN, dtype=tf.int32)
+      shape=(1,), batch_size=batch_size, name=movielens.USER_COLUMN, dtype=tf.int32)
   item_input = tf.keras.layers.Input(
-      shape=(), batch_size=batch_size, name=movielens.ITEM_COLUMN, dtype=tf.int32)
+      shape=(1,), batch_size=batch_size, name=movielens.ITEM_COLUMN, dtype=tf.int32)
 
-  base_model = neumf_model.construct_model(user_input, item_input, params)
+  base_model = neumf_model.construct_model(user_input, item_input, params, need_strip=True)
   base_model_output = base_model.output
 
   zeros = tf.keras.layers.Lambda(
@@ -168,7 +168,7 @@ def run_ncf(_):
   train_input_dataset, eval_input_dataset = _get_train_and_eval_data(producer, params)
   print(">>>>>>>>>>>>>>>> train_input_dataset: ", train_input_dataset)
   strategy = distribution_utils.get_distribution_strategy(num_gpus=FLAGS.num_gpus)
-
+  strategy = None
   print(">>>>>>>>>>>>>>>> strategy: ", strategy)
   with distribution_utils.MaybeDistributionScope(strategy):
     keras_model = _get_keras_model(params)

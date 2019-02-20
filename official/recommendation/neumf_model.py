@@ -141,7 +141,7 @@ def neumf_model_fn(features, labels, mode, params):
 
 
 def _strip_first_and_last_dimension(x, batch_size):
-  return tf.reshape(x[0, :], (batch_size,))
+  return tf.reshape(x, (batch_size,))
 
 
 def construct_model(user_input, item_input, params, need_strip=False):
@@ -180,6 +180,7 @@ def construct_model(user_input, item_input, params, need_strip=False):
   if need_strip:
     batch_size = params["batch_size"]
 
+    print(">>>>>>>>>>>>>>>>>> user_input: ", user_input)
     user_input_reshaped = tf.keras.layers.Lambda(
         lambda x: _strip_first_and_last_dimension(
             x, batch_size))(user_input)
