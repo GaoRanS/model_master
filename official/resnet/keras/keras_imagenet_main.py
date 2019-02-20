@@ -73,8 +73,10 @@ def parse_record_keras(raw_record, is_training, dtype):
 
   # Subtract one so that labels are in [0, 1000), and cast to float32 for
   # Keras model.
+  print (">>>>>>>>>>>>>>> berfore reshape: ", label)
   label = tf.cast(tf.cast(tf.reshape(label, shape=[1]), dtype=tf.int32) - 1,
                   dtype=tf.float32)
+  print (">>>>>>>>>>>>>>> after reshape: ", label)
   return image, label
 
 

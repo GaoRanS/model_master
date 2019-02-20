@@ -73,12 +73,12 @@ def get_distribution_strategy(distribution_strategy="default",
     else:
       devices = ["device:GPU:%d" % i for i in range(num_gpus)]
     if all_reduce_alg:
-      return tf.distribute.MirroredStrategy(
+      return tf.contrib.distribute.MirroredStrategy(
           devices=devices,
           cross_device_ops=tf.contrib.distribute.AllReduceCrossDeviceOps(
               all_reduce_alg, num_packs=2))
     else:
-      return tf.distribute.MirroredStrategy(devices=devices)
+      return tf.contrib.distribute.MirroredStrategy(devices=devices)
 
   if distribution_strategy == "collective":
     return tf.contrib.distribute.CollectiveAllReduceStrategy(
