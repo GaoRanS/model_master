@@ -54,6 +54,18 @@ def _keras_loss(y_true, y_pred):
   return loss
 
 
+def _keras_loss_with_weights(y_true, y_pred, weights):
+  loss_obj = tf.keras.losses.SparseCategoricalCrossentropy(
+      from_logits=True,
+      reduction=tf.keras.losses.Reduction.SUM)
+
+  print(">>>>>>>> zhenzheng y_true: ", y_true)
+  print(">>>>>>>> zhenzheng y_pred: ", y_pred)
+  print(">>>>>>>> zhenzheng weights: ", weights)
+
+  return loss_obj(tf.cast(y_true, tf.int32), y_pred, weights)
+
+
 def _get_metric_fn(params):
   """Get the metrix fn used by model compile."""
   batch_size = params["batch_size"]
@@ -103,8 +115,10 @@ def _get_train_and_eval_data(producer, params):
       it extra, so it needs to be removed.
     - The label needs to be extended to be used in the loss fn
     """
-    features.pop(rconst.VALID_POINT_MASK)
     labels = tf.expand_dims(labels, -1)
+    fake_dup_mask = tf.zeros_like(features[movielens.USER_COLUMN])
+    features[rconst.DUPLICATE_MASK] = fake_dup_mask
+    features[rconst.TRAIN_LABEL_KEY] = labels
     return features, labels
 
   train_input_fn = producer.make_input_fn(is_training=True)
@@ -120,9 +134,11 @@ def _get_train_and_eval_data(producer, params):
       it extra, so it needs to be removed.
     - The label needs to be extended to be used in the loss fn
     """
-    features.pop(rconst.DUPLICATE_MASK)
     labels = tf.zeros_like(features[movielens.USER_COLUMN])
     labels = tf.expand_dims(labels, -1)
+    fake_valit_pt_mask = tf.zeros_like(features[movielens.USER_COLUMN])
+    features[rconst.VALID_POINT_MASK] = fake_valit_pt_mask
+    features[rconst.TRAIN_LABEL_KEY] = labels
     return features, labels
 
   eval_input_fn = producer.make_input_fn(is_training=False)
@@ -167,6 +183,24 @@ def _get_keras_model(params):
       name=movielens.ITEM_COLUMN,
       dtype=tf.int32)
 
+  dup_mask_input = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=params["batches_per_step"],
+      name=rconst.DUPLICATE_MASK,
+      dtype=tf.int32)
+
+  valid_pt_mask_input = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=params["batches_per_step"],
+      name=rconst.VALID_POINT_MASK,
+      dtype=tf.int32)
+
+  label_input = tf.keras.layers.Input(
+      shape=(batch_size,),
+      batch_size=params["batches_per_step"],
+      name=rconst.TRAIN_LABEL_KEY,
+      dtype=tf.int32)
+
   base_model = neumf_model.construct_model(
       user_input, item_input, params, need_strip=True)
 
@@ -184,7 +218,11 @@ def _get_keras_model(params):
       axis=-1)
 
   keras_model = tf.keras.Model(
-      inputs=[user_input, item_input],
+      inputs=[user_input,
+              item_input,
+              dup_mask_input,
+              valid_pt_mask_input,
+              label_input],
       outputs=softmax_logits)
 
   keras_model.summary()
@@ -235,8 +273,12 @@ def run_ncf(_):
         epsilon=params["epsilon"])
     time_callback = keras_utils.TimeHistory(batch_size, FLAGS.log_steps)
 
+    keras_model.add_loss(_keras_loss_with_weights(
+      keras_model.inputs[-1], # y_true
+      keras_model.output, # y_pred
+      keras_model.inputs[2])) # dup_mask as weights
+
     keras_model.compile(
-        loss=_keras_loss,
         metrics=[_get_metric_fn(params)],
         optimizer=optimizer)
 
