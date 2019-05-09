@@ -45,28 +45,15 @@ from official.utils.misc import model_helpers
 FLAGS = flags.FLAGS
 
 
-def _keras_loss(y_true, y_pred):
-  # Here we are using the exact same loss used by the estimator
-  loss = tf.keras.losses.sparse_categorical_crossentropy(
-      y_pred=y_pred,
-      y_true=tf.cast(y_true, tf.int32),
-      from_logits=True)
-  return loss
-
-
 def _keras_loss_with_weights(y_true, y_pred, weights):
   loss_obj = tf.keras.losses.SparseCategoricalCrossentropy(
       from_logits=True,
       reduction=tf.keras.losses.Reduction.SUM)
 
-  print(">>>>>>>> zhenzheng y_true: ", y_true)
-  print(">>>>>>>> zhenzheng y_pred: ", y_pred)
-  print(">>>>>>>> zhenzheng weights: ", weights)
-
   return loss_obj(tf.cast(y_true, tf.int32), y_pred, weights)
 
 
-def _get_metric_fn(params):
+def _get_metric_fn(duplicate_mask, params):
   """Get the metrix fn used by model compile."""
   batch_size = params["batch_size"]
 
@@ -75,29 +62,16 @@ def _get_metric_fn(params):
     softmax_logits = y_pred[0, :]
     logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
 
-    # The dup mask should be obtained from input data, but we did not yet find
-    # a good way of getting it with keras, so we set it to zeros to neglect the
-    # repetition correction
-    dup_mask = tf.zeros([batch_size, 1])
-
-    _, _, in_top_k, _, _ = (
+    _, metric_fn, in_top_k, ndcg, metric_weights = (
         neumf_model.compute_eval_loss_and_metrics_helper(
             logits,
             softmax_logits,
-            dup_mask,
+            duplicate_mask,
             params["num_neg"],
             params["match_mlperf"],
             params["use_xla_for_gpu"]))
 
-    is_training = tf.keras.backend.learning_phase()
-    if isinstance(is_training, int):
-      is_training = tf.constant(bool(is_training), dtype=tf.bool)
-
-    in_top_k = tf.cond(
-        is_training,
-        lambda: tf.zeros(shape=in_top_k.shape, dtype=in_top_k.dtype),
-        lambda: in_top_k)
-
+    # return metric_fn(in_top_k, ndcg, metric_weights)
     return in_top_k
 
   return metric_fn
@@ -274,12 +248,13 @@ def run_ncf(_):
     time_callback = keras_utils.TimeHistory(batch_size, FLAGS.log_steps)
 
     keras_model.add_loss(_keras_loss_with_weights(
-      keras_model.inputs[-1], # y_true
+      keras_model.inputs[4], # y_true
       keras_model.output, # y_pred
-      keras_model.inputs[2])) # dup_mask as weights
+      keras_model.inputs[3])) # valid_pt_mask
 
     keras_model.compile(
-        metrics=[_get_metric_fn(params)],
+        metrics=[_get_metric_fn(keras_model.inputs[2],  # dup_mask_input
+                                params)],
         optimizer=optimizer)
 
     history = keras_model.fit(train_input_dataset,
@@ -296,7 +271,9 @@ def run_ncf(_):
         steps=num_eval_steps,
         verbose=2)
 
+  eval_results_str = eval_results.astype(str)
   logging.info("Keras evaluation is done.")
+  print(">>>>>>>>>> zhenzheng result: ", eval_results_str)
 
   stats = build_stats(history, eval_results, time_callback)
   return stats
