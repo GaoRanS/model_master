@@ -123,11 +123,11 @@ def _get_train_and_eval_data(producer, params):
       it extra, so it needs to be removed.
     - The label needs to be extended to be used in the loss fn
     """
-    labels = tf.expand_dims(labels, -1)
+    expanded_labels = tf.expand_dims(labels, -1)
     fake_dup_mask = tf.zeros_like(features[movielens.USER_COLUMN])
     features[rconst.DUPLICATE_MASK] = fake_dup_mask
     features[rconst.TRAIN_LABEL_KEY] = labels
-    return features, labels
+    return features, expanded_labels
 
   train_input_fn = producer.make_input_fn(is_training=True)
   train_input_dataset = train_input_fn(params).map(
@@ -142,12 +142,13 @@ def _get_train_and_eval_data(producer, params):
       it extra, so it needs to be removed.
     - The label needs to be extended to be used in the loss fn
     """
-    labels = tf.zeros_like(features[movielens.USER_COLUMN])
-    labels = tf.expand_dims(labels, -1)
-    fake_valit_pt_mask = tf.zeros_like(features[movielens.USER_COLUMN])
+    labels = tf.cast(tf.zeros_like(features[movielens.USER_COLUMN]), tf.bool)
+    expanded_labels = tf.expand_dims(labels, -1)
+    fake_valit_pt_mask = tf.cast(tf.zeros_like(features[movielens.USER_COLUMN]),
+                                 tf.bool)
     features[rconst.VALID_POINT_MASK] = fake_valit_pt_mask
     features[rconst.TRAIN_LABEL_KEY] = labels
-    return features, labels
+    return features, expanded_labels
 
   eval_input_fn = producer.make_input_fn(is_training=False)
   eval_input_dataset = eval_input_fn(params).map(
@@ -201,13 +202,13 @@ def _get_keras_model(params):
       shape=(batch_size,),
       batch_size=params["batches_per_step"],
       name=rconst.VALID_POINT_MASK,
-      dtype=tf.int32)
+      dtype=tf.bool)
 
   label_input = tf.keras.layers.Input(
       shape=(batch_size,),
       batch_size=params["batches_per_step"],
       name=rconst.TRAIN_LABEL_KEY,
-      dtype=tf.int32)
+      dtype=tf.bool)
 
   base_model = neumf_model.construct_model(
       user_input, item_input, params, need_strip=True)
@@ -290,7 +291,7 @@ def run_ncf(_):
     valid_pt_mask = keras_model.inputs[3]
 
     keras_model.compile(
-        loss=_keras_loss,
+        # loss=_keras_loss,
         metrics=[_get_metric_fn(None, params)],
         optimizer=optimizer)
 
