@@ -53,11 +53,46 @@ def _keras_loss_with_weights(y_true, y_pred, weights):
   return loss_obj(tf.cast(y_true, tf.int32), y_pred, weights)
 
 
+def _keras_loss(y_true, y_pred):
+  loss = tf.keras.losses.sparse_categorical_crossentropy(
+      y_pred=y_pred,
+      y_true=tf.cast(y_true, tf.int32),
+      from_logits=True)
+  return loss
+
+
 def _get_metric_fn(duplicate_mask, params):
   """Get the metrix fn used by model compile."""
   batch_size = params["batch_size"]
 
-  def metric_fn(y_true, y_pred):
+  def metric_fn_old(y_true, y_pred):
+    """Returns the in_top_k metric."""
+    softmax_logits = y_pred[0, :]
+    logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
+
+    dup_mask = tf.zeros([batch_size, 1])
+
+    _, metric_fn, in_top_k, ndcg, metric_weights = (
+        neumf_model.compute_eval_loss_and_metrics_helper(
+            logits,
+            softmax_logits,
+            dup_mask,
+            params["num_neg"],
+            params["match_mlperf"],
+            params["use_xla_for_gpu"]))
+
+    is_training = tf.keras.backend.learning_phase()
+    if isinstance(is_training, int):
+      is_training = tf.constant(bool(is_training), dtype=tf.bool)
+
+    in_top_k = tf.cond(
+        is_training,
+        lambda: tf.zeros(shape=in_top_k.shape, dtype=in_top_k.dtype),
+        lambda: in_top_k)
+
+    return in_top_k
+
+  def metric_fn_new(y_true, y_pred):
     """Returns the in_top_k metric."""
     softmax_logits = y_pred[0, :]
     logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
@@ -71,10 +106,9 @@ def _get_metric_fn(duplicate_mask, params):
             params["match_mlperf"],
             params["use_xla_for_gpu"]))
 
-    # return metric_fn(in_top_k, ndcg, metric_weights)
-    return in_top_k
+    return metric_fn(in_top_k, ndcg, metric_weights)
 
-  return metric_fn
+  return metric_fn_old
 
 
 def _get_train_and_eval_data(producer, params):
@@ -252,9 +286,12 @@ def run_ncf(_):
       keras_model.output, # y_pred
       keras_model.inputs[3])) # valid_pt_mask
 
+    duplicate_mask = keras_model.inputs[2]
+    valid_pt_mask = keras_model.inputs[3]
+
     keras_model.compile(
-        metrics=[_get_metric_fn(keras_model.inputs[2],  # dup_mask_input
-                                params)],
+        loss=_keras_loss,
+        metrics=[_get_metric_fn(None, params)],
         optimizer=optimizer)
 
     history = keras_model.fit(train_input_dataset,
@@ -271,9 +308,8 @@ def run_ncf(_):
         steps=num_eval_steps,
         verbose=2)
 
-  eval_results_str = eval_results.astype(str)
   logging.info("Keras evaluation is done.")
-  print(">>>>>>>>>> zhenzheng result: ", eval_results_str)
+  print(">>>>>>>>>> zhenzheng result: ", eval_results)
 
   stats = build_stats(history, eval_results, time_callback)
   return stats
