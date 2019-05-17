@@ -50,7 +50,10 @@ def _keras_loss_with_weights(y_true, y_pred, weights):
       from_logits=True,
       reduction=tf.keras.losses.Reduction.SUM)
 
-  return loss_obj(tf.cast(y_true, tf.int32), y_pred, weights)
+  return loss_obj(
+      y_true=tf.cast(y_true, tf.int32),
+      y_pred=y_pred,
+      sample_weight=weights)
 
 
 def _keras_loss(y_true, y_pred):
