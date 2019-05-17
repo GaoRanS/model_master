@@ -282,13 +282,14 @@ def run_ncf(_):
         epsilon=params["epsilon"])
     time_callback = keras_utils.TimeHistory(batch_size, FLAGS.log_steps)
 
-    keras_model.add_loss(_keras_loss_with_weights(
-      keras_model.inputs[4], # y_true
-      keras_model.output, # y_pred
-      keras_model.inputs[3])) # valid_pt_mask
-
     duplicate_mask = keras_model.inputs[2]
     valid_pt_mask = keras_model.inputs[3]
+    train_label = keras_model.inputs[-1]
+
+    keras_model.add_loss(_keras_loss_with_weights(
+      train_label, # y_true
+      keras_model.output, # y_pred
+      valid_pt_mask)) # valid_pt_mask
 
     keras_model.compile(
         # loss=_keras_loss,
