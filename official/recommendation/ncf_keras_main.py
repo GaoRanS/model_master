@@ -50,10 +50,12 @@ def _keras_loss_with_weights(y_true, y_pred, weights):
       from_logits=True,
       reduction=tf.keras.losses.Reduction.SUM)
 
-  return loss_obj(
+  weights = None
+
+  return tf.math.divide(loss_obj(
       y_true=tf.cast(y_true, tf.int32),
       y_pred=y_pred,
-      sample_weight=weights)
+      sample_weight=weights), 160000)
 
 
 def _keras_loss(y_true, y_pred):
@@ -104,14 +106,14 @@ def _get_metric_fn(duplicate_mask, params):
         neumf_model.compute_eval_loss_and_metrics_helper(
             logits,
             softmax_logits,
-            duplicate_mask,
+            tf.cast(duplicate_mask, tf.float32),
             params["num_neg"],
             params["match_mlperf"],
             params["use_xla_for_gpu"]))
 
     return metric_fn(in_top_k, ndcg, metric_weights)
 
-  return metric_fn_old
+  return metric_fn_new
 
 
 def _get_train_and_eval_data(producer, params):
@@ -276,7 +278,7 @@ def run_ncf(_):
   eval_input_dataset = eval_input_dataset.batch(batches_per_step)
 
   strategy = ncf_common.get_distribution_strategy(params)
-  with distribution_utils.get_strategy_scope(strategy):
+  with distribution_utils.get_strategy_scope(None): #strategy):
     keras_model = _get_keras_model(params)
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=params["learning_rate"],
@@ -293,6 +295,13 @@ def run_ncf(_):
       train_label, # y_true
       keras_model.output, # y_pred
       valid_pt_mask)) # valid_pt_mask
+
+    '''
+    keras_model.add_metric(
+        _get_metric_fn(duplicate_mask, params)(
+          y_true=train_label,
+          y_pred=keras_model.output))
+    '''
 
     keras_model.compile(
         # loss=_keras_loss,
@@ -316,8 +325,8 @@ def run_ncf(_):
   logging.info("Keras evaluation is done.")
   print(">>>>>>>>>> zhenzheng result: ", eval_results)
 
-  stats = build_stats(history, eval_results, time_callback)
-  return stats
+  # stats = build_stats(history, eval_results, time_callback)
+  # return stats
 
 
 def build_stats(history, eval_result, time_callback):
