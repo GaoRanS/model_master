@@ -263,17 +263,16 @@ def _get_estimator_spec_with_metrics(logits,              # type: tf.Tensor
                                      use_tpu_spec=False   # type: bool
                                     ):
   """Returns a EstimatorSpec that includes the metrics."""
-  cross_entropy, \
   metric_fn, \
   in_top_k, \
   ndcg, \
   metric_weights = compute_eval_loss_and_metrics_helper(
       logits,
-      softmax_logits,
       duplicate_mask,
-      num_training_neg,
       match_mlperf,
       use_tpu_spec)
+
+  cross_entropy = get_estimator_loss(softmax_logits, num_training_neg)
 
   if use_tpu_spec:
     return tf.contrib.tpu.TPUEstimatorSpec(
@@ -288,10 +287,47 @@ def _get_estimator_spec_with_metrics(logits,              # type: tf.Tensor
   )
 
 
+def get_estimator_loss(softmax_logits, num_training_neg):
+  # Examples are provided by the eval Dataset in a structured format, so eval
+  # labels can be reconstructed on the fly.
+  eval_labels = tf.reshape(shape=(-1,), tensor=tf.one_hot(
+      tf.zeros(shape=(logits_by_user.shape[0],), dtype=tf.int32) +
+      rconst.NUM_EVAL_NEGATIVES, logits_by_user.shape[1], dtype=tf.int32))
+
+  eval_labels_float = tf.cast(eval_labels, tf.float32)
+
+  # During evaluation, the ratio of negatives to positives is much higher
+  # than during training. (Typically 999 to 1 vs. 4 to 1) By adjusting the
+  # weights for the negative examples we compute a loss which is consistent with
+  # the training data. (And provides apples-to-apples comparison)
+  negative_scale_factor = num_training_neg / rconst.NUM_EVAL_NEGATIVES
+  example_weights = (
+      (eval_labels_float + (1 - eval_labels_float) * negative_scale_factor) *
+      (1 + rconst.NUM_EVAL_NEGATIVES) / (1 + num_training_neg))
+
+  # Tile metric weights back to logit dimensions
+  expanded_metric_weights = tf.reshape(tf.tile(
+      metric_weights[:, tf.newaxis], (1, rconst.NUM_EVAL_NEGATIVES + 1)), (-1,))
+
+  # ignore padded examples
+  example_weights *= tf.cast(expanded_metric_weights, tf.float32)
+
+  cross_entropy = tf.losses.SparseCategoricalCrossentropy(
+          from_logits=True)(
+      y_true=eval_labels,
+      y_pred=softmax_logits,
+      sample_weight=example_weights)
+
+  '''
+  cross_entropy = tf.compat.v1.losses.sparse_softmax_cross_entropy(
+      logits=softmax_logits, labels=eval_labels, weights=example_weights)
+  '''
+
+  return cross_entropy
+
+
 def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
-                                         softmax_logits,      # type: tf.Tensor
                                          duplicate_mask,      # type: tf.Tensor
-                                         num_training_neg,    # type: int
                                          match_mlperf=False,  # type: bool
                                          use_tpu_spec=False   # type: bool
                                         ):
@@ -365,34 +401,9 @@ def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
   in_top_k, ndcg, metric_weights, logits_by_user = compute_top_k_and_ndcg(
       logits, duplicate_mask, match_mlperf)
 
-  # Examples are provided by the eval Dataset in a structured format, so eval
-  # labels can be reconstructed on the fly.
-  eval_labels = tf.reshape(shape=(-1,), tensor=tf.one_hot(
-      tf.zeros(shape=(logits_by_user.shape[0],), dtype=tf.int32) +
-      rconst.NUM_EVAL_NEGATIVES, logits_by_user.shape[1], dtype=tf.int32))
-
-  eval_labels_float = tf.cast(eval_labels, tf.float32)
-
-  # During evaluation, the ratio of negatives to positives is much higher
-  # than during training. (Typically 999 to 1 vs. 4 to 1) By adjusting the
-  # weights for the negative examples we compute a loss which is consistent with
-  # the training data. (And provides apples-to-apples comparison)
-  negative_scale_factor = num_training_neg / rconst.NUM_EVAL_NEGATIVES
-  example_weights = (
-      (eval_labels_float + (1 - eval_labels_float) * negative_scale_factor) *
-      (1 + rconst.NUM_EVAL_NEGATIVES) / (1 + num_training_neg))
-
-  # Tile metric weights back to logit dimensions
-  expanded_metric_weights = tf.reshape(tf.tile(
-      metric_weights[:, tf.newaxis], (1, rconst.NUM_EVAL_NEGATIVES + 1)), (-1,))
-
-  # ignore padded examples
-  example_weights *= tf.cast(expanded_metric_weights, tf.float32)
-
-  cross_entropy = tf.compat.v1.losses.sparse_softmax_cross_entropy(
-      logits=softmax_logits, labels=eval_labels, weights=example_weights)
 
   def metric_fn(top_k_tensor, ndcg_tensor, weight_tensor):
+    '''
     return {
         rconst.HR_KEY: tf.compat.v1.metrics.mean(top_k_tensor,
                                                  weights=weight_tensor,
@@ -401,8 +412,19 @@ def compute_eval_loss_and_metrics_helper(logits,              # type: tf.Tensor
                                                    weights=weight_tensor,
                                                    name=rconst.NDCG_METRIC_NAME)
     }
+    '''
 
-  return cross_entropy, metric_fn, in_top_k, ndcg, metric_weights
+    hr_metric = tf.keras.metrics.Mean(name=rconst.HR_METRIC_NAME)
+    hr_metric.update_state(top_k_tensor, weight_tensor)
+
+    ndcg_metric = tf.keras.metrics.Mean(name=rconst.NDCG_METRIC_NAME)
+    ndcg_metric.update_state(ndcg_tensor, weight_tensor)
+    return {
+        rconst.HR_KEY: hr_metric.result(),
+        rconst.NDCG_KEY: ndcg_metric.result()
+    }
+
+  return metric_fn, in_top_k, ndcg, metric_weights
 
 
 def compute_top_k_and_ndcg(logits,              # type: tf.Tensor

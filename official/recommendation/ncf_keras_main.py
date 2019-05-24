@@ -50,12 +50,10 @@ def _keras_loss_with_weights(y_true, y_pred, weights):
       from_logits=True,
       reduction=tf.keras.losses.Reduction.SUM)
 
-  weights = None
-
   return tf.math.divide(loss_obj(
       y_true=tf.cast(y_true, tf.int32),
       y_pred=y_pred,
-      sample_weight=weights), 160000)
+      sample_weight=weights), FLAGS.batch_size)
 
 
 def _keras_loss(y_true, y_pred):
@@ -70,50 +68,26 @@ def _get_metric_fn(duplicate_mask, params):
   """Get the metrix fn used by model compile."""
   batch_size = params["batch_size"]
 
-  def metric_fn_old(y_true, y_pred):
+  def metric_fn(y_true, y_pred):
     """Returns the in_top_k metric."""
     softmax_logits = y_pred[0, :]
     logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
 
-    dup_mask = tf.zeros([batch_size, 1])
+    duplicate_mask = tf.zeros([batch_size, 1])
 
-    _, metric_fn, in_top_k, ndcg, metric_weights = (
+    weights = None
+
+    metric_fn, in_top_k, ndcg, metric_weights = (
         neumf_model.compute_eval_loss_and_metrics_helper(
             logits,
-            softmax_logits,
-            dup_mask,
-            params["num_neg"],
+            tf.cast(duplicate_mask, tf.float32),
             params["match_mlperf"],
             params["use_xla_for_gpu"]))
 
-    is_training = tf.keras.backend.learning_phase()
-    if isinstance(is_training, int):
-      is_training = tf.constant(bool(is_training), dtype=tf.bool)
-
-    in_top_k = tf.cond(
-        is_training,
-        lambda: tf.zeros(shape=in_top_k.shape, dtype=in_top_k.dtype),
-        lambda: in_top_k)
-
+    # return metric_fn(in_top_k, ndcg, metric_weights)
     return in_top_k
 
-  def metric_fn_new(y_true, y_pred):
-    """Returns the in_top_k metric."""
-    softmax_logits = y_pred[0, :]
-    logits = tf.slice(softmax_logits, [0, 1], [batch_size, 1])
-
-    _, metric_fn, in_top_k, ndcg, metric_weights = (
-        neumf_model.compute_eval_loss_and_metrics_helper(
-            logits,
-            softmax_logits,
-            tf.cast(duplicate_mask, tf.float32),
-            params["num_neg"],
-            params["match_mlperf"],
-            params["use_xla_for_gpu"]))
-
-    return metric_fn(in_top_k, ndcg, metric_weights)
-
-  return metric_fn_new
+  return metric_fn
 
 
 def _get_train_and_eval_data(producer, params):
@@ -131,7 +105,8 @@ def _get_train_and_eval_data(producer, params):
     expanded_labels = tf.expand_dims(labels, -1)
     fake_dup_mask = tf.zeros_like(features[movielens.USER_COLUMN])
     features[rconst.DUPLICATE_MASK] = fake_dup_mask
-    features[rconst.TRAIN_LABEL_KEY] = labels
+    features[rconst.TRAIN_LABEL_KEY] = expanded_labels
+    # return features
     return features, expanded_labels
 
   train_input_fn = producer.make_input_fn(is_training=True)
@@ -152,7 +127,8 @@ def _get_train_and_eval_data(producer, params):
     fake_valit_pt_mask = tf.cast(tf.zeros_like(features[movielens.USER_COLUMN]),
                                  tf.bool)
     features[rconst.VALID_POINT_MASK] = fake_valit_pt_mask
-    features[rconst.TRAIN_LABEL_KEY] = labels
+    features[rconst.TRAIN_LABEL_KEY] = expanded_labels
+    # return features
     return features, expanded_labels
 
   eval_input_fn = producer.make_input_fn(is_training=False)
@@ -210,7 +186,7 @@ def _get_keras_model(params):
       dtype=tf.bool)
 
   label_input = tf.keras.layers.Input(
-      shape=(batch_size,),
+      shape=(batch_size, 1),
       batch_size=params["batches_per_step"],
       name=rconst.TRAIN_LABEL_KEY,
       dtype=tf.bool)
@@ -277,8 +253,11 @@ def run_ncf(_):
   train_input_dataset = train_input_dataset.batch(batches_per_step)
   eval_input_dataset = eval_input_dataset.batch(batches_per_step)
 
+  print(">>>>>>>>>> zhenzheng train_input_dataset: ", train_input_dataset)
+  print(">>>>>>>>>> zhenzheng eval_input_dataset: ", eval_input_dataset)
+
   strategy = ncf_common.get_distribution_strategy(params)
-  with distribution_utils.get_strategy_scope(None): #strategy):
+  with distribution_utils.get_strategy_scope(strategy):
     keras_model = _get_keras_model(params)
     optimizer = tf.keras.optimizers.Adam(
         learning_rate=params["learning_rate"],
@@ -293,19 +272,18 @@ def run_ncf(_):
 
     keras_model.add_loss(_keras_loss_with_weights(
       train_label, # y_true
-      keras_model.output, # y_pred
+      keras_model.output,  # y_pred
       valid_pt_mask)) # valid_pt_mask
 
-    '''
     keras_model.add_metric(
-        _get_metric_fn(duplicate_mask, params)(
-          y_true=train_label,
-          y_pred=keras_model.output))
-    '''
+        tf.reduce_sum(
+          _get_metric_fn(duplicate_mask, params)(
+            y_true=train_label,
+            y_pred=keras_model.output)),
+        name='mean_activation',
+        aggregation='mean')
 
     keras_model.compile(
-        # loss=_keras_loss,
-        metrics=[_get_metric_fn(None, params)],
         optimizer=optimizer)
 
     history = keras_model.fit(train_input_dataset,
