@@ -127,12 +127,19 @@ class TransformerTask(object):
         model = transformer.create_model(params, is_train)
         opt = self._create_optimizer()
         model.compile(opt)
+        # Load data from existing checkpoint, if any.
+        self._load_weights_if_possible(
+            model, tf.train.latest_checkpoint(self.flags_obj.model_dir))
     else:
       model = transformer.create_model(params, is_train)
       opt = self._create_optimizer()
       model.compile(opt)
-
+      # Load data from existing checkpoint, if any.
+      self._load_weights_if_possible(
+          model, tf.train.latest_checkpoint(self.flags_obj.model_dir))
+        
     model.summary()
+
 
     # TODO(guptapriya): Figure out a way to structure input that works in both
     # distributed and non distributed cases.
