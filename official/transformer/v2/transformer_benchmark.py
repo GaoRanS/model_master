@@ -194,8 +194,9 @@ class TransformerBaseKerasAccuracy(TransformerBenchmark):
     FLAGS['bleu_ref'].value = self.bleu_ref
     FLAGS.param_set = 'base'
     FLAGS.batch_size = 4096*8
-    FLAGS.train_steps = 100000
-    FLAGS.steps_between_evals = 5000
+    FLAGS.train_steps = 200000
+    FLAGS.steps_between_evals = 10000
+    #FLAGS.model_dir = "gs://tf-performance/test-results/2019-06-06-05-44-37-563832/benchmark_8_gpu"
     FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu')
     self._run_and_report_benchmark(total_batch_size=FLAGS.batch_size,
                                    log_steps=FLAGS.log_steps,
@@ -260,9 +261,10 @@ class TransformerBigKerasAccuracy(TransformerBenchmark):
     FLAGS['bleu_ref'].value = self.bleu_ref
     FLAGS.param_set = 'big'
     FLAGS.batch_size = 3072*8
-    FLAGS.train_steps = 100000
-    FLAGS.steps_between_evals = 5000
-    FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu')
+    FLAGS.train_steps = 200000
+    FLAGS.steps_between_evals = 10000
+    FLAGS.model_dir = "gs://tf-performance/test-results/2019-06-06-05-44-37-563832/benchmark_8_gpu"
+    #FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu')
     self._run_and_report_benchmark(total_batch_size=FLAGS.batch_size,
                                    log_steps=FLAGS.log_steps,
                                    bleu_min=28,
