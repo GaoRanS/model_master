@@ -239,7 +239,8 @@ def build_stats(history, callbacks):
   if history and history.history:
     train_hist = history.history
     # Gets final loss from training.
-    stats['loss'] = train_hist['loss'][-1].item()
+    if 'loss' in train_hist and train_hist['loss'][-1]:
+      stats['loss'] = train_hist['loss'][-1].item()
 
   if not callbacks:
     return stats
