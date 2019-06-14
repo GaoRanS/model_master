@@ -154,7 +154,7 @@ class TransformerBigEstimatorAccuracy(EstimatorBenchmark):
     FLAGS.param_set = 'big'
     FLAGS.batch_size = 3072 * 8
     FLAGS.train_steps = 600000
-    FLAGS.steps_between_evals = 5000
+    FLAGS.steps_between_evals = 20000
     FLAGS.model_dir = self._get_model_dir('benchmark_graph_8_gpu')
     FLAGS.hooks = ['ExamplesPerSecondHook']
     self._run_and_report_benchmark()
