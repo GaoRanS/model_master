@@ -164,8 +164,8 @@ class MetricLayer(tf.keras.layers.Layer):
     def merge_fn(_):
       return 1
     if rc:
-      pass
-      #rc.merge_call(merge_fn)                    
+      #pass
+      rc.merge_call(merge_fn)                    
     
     #for mean, fn in self.metric_mean_fns:
     #  m = mean(*fn(logits, targets))
