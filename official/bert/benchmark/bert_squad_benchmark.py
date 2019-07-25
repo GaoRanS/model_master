@@ -241,10 +241,14 @@ class BertSquadAccuracy(BertSquadBenchmarkBase):
     FLAGS.num_train_epochs = 2
     FLAGS.steps_per_loop = 1
 
-  def _run_and_report_benchmark(self):
+  def _run_and_report_benchmark(self,
+                                use_ds=True,
+                                enable_xla=False,
+                                run_eagerly=False):
     """Runs the benchmark and reports various metrics."""
+    keras_utils.set_config_v2(enable_xla)
     start_time_sec = time.time()
-    self._train_squad()
+    self._train_squad(use_ds=use_ds, run_eagerly=run_eagerly)
     self._evaluate_squad()
     wall_time_sec = time.time() - start_time_sec
 
@@ -256,6 +260,16 @@ class BertSquadAccuracy(BertSquadBenchmarkBase):
         wall_time_sec=wall_time_sec,
         min_accuracy=0.900,
         max_accuracy=0.908)
+
+  def benchmark_1_gpu_eager(self):
+    """Tests BERT SQuAD model accuracy with 1 GPU with eager execution."""
+
+    self._setup()
+    self.num_gpus = 1
+    FLAGS.model_dir = self._get_model_dir('benchmark_1_gpu_squad_eager')
+    FLAGS.train_batch_size = 4
+
+    self._run_and_report_benchmark(use_ds=False, run_eagerly=True)
 
   def benchmark_8_gpu(self):
     """Tests BERT SQuAD model accuracy with 8 GPUs."""
@@ -271,12 +285,11 @@ class BertSquadAccuracy(BertSquadBenchmarkBase):
     """Tests BERT SQuAD model accuracy with 8 GPUs."""
 
     self._setup()
-    keras_utils.set_config_v2(enable_xla)
     self.num_gpus = 8
     FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu_squad_xla')
     FLAGS.train_batch_size = 32
 
-    self._run_and_report_benchmark()
+    self._run_and_report_benchmark(enable_xla=True)
 
 
 if __name__ == '__main__':
