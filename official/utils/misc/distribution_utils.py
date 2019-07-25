@@ -118,9 +118,7 @@ def get_distribution_strategy(distribution_strategy="default",
       raise ValueError(
           "When {} GPUs and  {} workers are specified, distribution_strategy "
           "flag cannot be set to 'off'.".format(num_gpus, num_workers))
-    return None
-
-  if distribution_strategy == "noop":
+    # Uses a No-op distribution strategy.
     return tf.distribute.get_strategy()
 
   if distribution_strategy == "multi_worker_mirrored":
