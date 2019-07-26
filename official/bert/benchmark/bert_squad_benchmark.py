@@ -322,6 +322,7 @@ class BertSquadAccuracy(BertSquadBenchmarkBase):
   def benchmark_8_gpu(self):
     """Tests BERT SQuAD model accuracy with 8 GPUs."""
 
+    os.environ['TF_ENABLE_GPU_GARBAGE_COLLECTION'] = 'true'
     self._setup()
     self.num_gpus = 8
     FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu_squad')
